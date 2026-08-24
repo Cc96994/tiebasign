@@ -7,9 +7,10 @@
 - 自动签到：多账号、全局 08:00 + 每账号自定义时间、前台服务保活、仅失败通知（系统通知 + App 内红点双独立开关）、不自动重试、仅保存最近一次结果快照
 - 安全：BDUSS 只用 Android Keystore AES-GCM 加密存本机，任何页面不显示完整 BDUSS；不保存明文密码、无签到历史、无跨设备恢复
 
-## 版本
-- 当前正式版：**0.3.0**（release，arm64-v8a，minSdk 23 / targetSdk 34）
-- 发布产物：`release/tieba-sign-assistant-0.3.0-arm64-v8a-release.apk`（附 `release/SHA256SUMS`）
+## 版本与下载
+- 当前正式版：**0.3.0**（arm64-v8a，minSdk 23 / Android 8.0+，targetSdk 34）
+- 安装包在 **GitHub Releases** 页面下载：`tieba-sign-assistant-0.3.0-arm64-v8a-release.apk`（附 `SHA256SUMS` 校验文件）
+- 若手机安装过同版本 debug 测试包，请先卸载再安装正式版（签名不同）
 
 ## 技术架构
 - Python 3.12.7 + aiotieba 4.7.1（NDK 编译 crypto 扩展 + certifi SSL 补丁 + 纯 Python protobuf 7.36.0）
@@ -22,10 +23,8 @@
 - `buildozer_webview_app.spec`  正式版构建配置（依赖全锁版）
 - `p4a_local/`         定制配方：aiotieba（NDK 编 crypto + HTTPS/certifi 补丁 + `-Wl,-z,global`）、protobuf（纯 Python）、zlib
 - `scripts/`           构建 / 核验 / 扫描脚本（wsl_app_build.sh、wsl_release_build.sh、leak_scan.sh、verify_*.sh）
-- `sign/`              发布签名密钥库与签名环境（**绝不提交到 Git，见 sign/README-SIGNING.txt**）
-- `release/`           正式签名 APK + SHA256SUMS
+- `SIGNING.md`          发布签名说明（签名材料本身绝不提交到 Git）
 - `CREDITS.md`         第三方致谢（含 TiebaLite 说明）
-- 早期诊断目录（`probe_app/`、`m21_smoke/`、`app_ksstage/`、`bin_*/` 等）仅开发历史产物，不影响正式版，上传 GitHub 时建议忽略。
 
 ## 硬性安全约束
 - 本项目及产物**绝不包含任何真实 BDUSS、BDUSS.txt 或旧脚本**；旧目录 `tieba_sign_app` 不复制、不打包、暂不修改。
@@ -44,7 +43,14 @@ bash /mnt/c/Users/s7909/Desktop/学习/aiotieba/tieba_sign_android/scripts/wsl_r
 
 产物：`bin_m22/tiebaweb-<ver>-arm64-v8a-{debug,release}.apk`，最终核验 `scripts/verify_release.sh`。
 
+> 注意：脚本内的项目路径基于本机 `C:\Users\s7909\...`，克隆到其它机器需先改成自己的路径。
+
+## 免责声明
+- 本应用**非百度官方产品**，仅供个人学习与账号签到使用。
+- 使用请遵守百度贴吧相关服务条款，任何账号风险（含风控、限制登录）由使用者自行承担。
+- 本项目不保存签到历史，不提供跨设备恢复；卸载应用或清除数据前请自行备份账号信息。
+
 ## 许可证
-- 本项目自身代码：暂未选择开源许可证（请勿在未确认前二次分发）。
-- 依赖：aiotieba / aiohttp / lxml / protobuf / cryptography / Kivy(p4a 组件) 等，按各自许可证。
+- 本项目自身代码：目前未随仓库附带 LICENSE 文件；如打算公开分发，建议在创建仓库时选择 **Apache-2.0**（GitHub 会自动生成 LICENSE）。
+- 依赖：aiotieba / aiohttp / lxml / protobuf / cryptography 等，按各自许可证。
 - 登录形态参考 TiebaLite（GPL-3.0）：仅参考公开网址与技术思路，未复制其代码，详见 `CREDITS.md`。
