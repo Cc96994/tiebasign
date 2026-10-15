@@ -1,0 +1,81 @@
+# 保密文件 —— 绝不提交到 Git
+/sign/
+*.keystore
+*.jks
+*signing.env
+*keystore*
+
+# 构建产物（GitHub Releases 里另附 APK，不入库）
+/.buildozer/
+/bin/
+/bin_*/
+/release/
+# 归档区：历史实验目录与一次性脚本（含约 337MB 旧 APK，绝不入库）
+/_legacy/
+
+# 运行日志与缓存
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+Thumbs.db
+
+# 本机运行时数据：加密后的登录态 + 签到记录。绝不入库。
+# （include_exts=py,png 已经挡住了它们进 APK，但源码目录里必须显式忽略，
+#   否则 git status 会一直把它们列成待提交文件。）
+/app/tiebasign.db*
+/app/tiebasign_accounts.json*
+
+# 开发期用无头浏览器渲染的界面示意图（编造的演示数据，不是真机截图）
+/_ui_shots/
+
+# 开发期诊断/实验目录（正式版不需要，也不建议入库）
+/app_bootprobe/
+/app_ksstage/
+/app_skipks/
+/m21_smoke/
+/probe_app/
+/main_smoke.py.bak
+/bin_bootprobe/
+/bin_ksstage/
+/bin_skipks/
+/bin_m21/
+/bin_probe/
+# 注意：/java_src/ 曾被列在这一节里，那是错的 —— 它看着像实验目录，其实是
+# **构建输入**：scripts/patch_base_java.py 把 java_src/org/**/*.java 和
+# java_src/PythonActivity.updater.inc 打进 p4a 底座（安装入口 / ApkProvider）。
+# 忽略它 = 别人克隆下来构建出的 APK 静默缺少原生安装能力。
+# 它现在必须入库，不要再加回来。
+
+# 可选：如想仓库更小，忽略离线 sdist 备份（构建会自动从官方 URL 下载）
+# /vendor/*.tar.gz
+# 但 third_party/p4a-dev.tar.gz 是**故意入库**的（p4a 底座源码包，约 1.3MB）：
+# 没有它，wsl_setup.sh 在新机器上无法重建底座 —— 那份曾经只存在于兄弟项目
+# tieba_sign_app 里。不要加 *.tar.gz 之类的通配把它扫走。
+
+# GitHub 整理目录：由 scripts/gen_github_src.sh 从当前树重新生成，
+# 内容就是"待上传清单"，本目录本身不入库。
+/github_src/
+
+# 手动上传用的暂存目录（只在本机存在，不入库）：
+#   repo_upload_*     = 待上传的仓库源码，逐字节副本，与 github_src/ 同源
+#   release_upload_*  = 发行版资产，**里面含 20MB 的 APK**
+# 注意：上面那条 /release/ 只管 release/ 这一个目录名，管不到 release_upload_*/。
+# 少了这两行，一次 git add -A 就会把 APK 提交进 git —— 而"APK 绝不进 git"是硬规矩。
+/repo_upload_*/
+/release_upload_*/
+
+# 旧版 SDL2/Kivy 遗留入口与历史 spec（现役入口为 app/main.py + buildozer_webview_app.spec）
+/main.py
+/icon.png
+# buildozer.spec 是**历史投影 spec**（version 0.1.0 / package.name=tiebasign），
+# 不是现役配置：wsl_app_build.sh / wsl_release_build.sh 会临时把它换成
+# buildozer_webview_app.spec，构建完再换回来。构建脚本自 2026-10-16 起能处理
+# "树里根本没有它"（新克隆就是这样），忽略它是安全的 —— 在被修好之前，
+# 这一行会让新克隆在第一条 cp -a 就死掉。
+/buildozer.spec
+/buildozer_bootprobe.spec
+/buildozer_ksstage.spec
+/buildozer_skipks.spec
+/buildozer_webview_probe.spec
+/PRD_ACCEPTANCE_0.2.0.md
