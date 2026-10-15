@@ -1,5 +1,7 @@
 # 贴吧签到助手 (tieba_sign_android)
 
+本软件由AI生成，该软件仅用于网络编程、接口分析的个人技术学习研究目的，仅供学习，下载完请在24h内删除
+
 基于 [aiotieba](https://github.com/Starry-OvO/aiotieba) 4.7.1 的百度贴吧多账号签到 Android App（首期仅 Android）。
 
 - 一键签到：msign 网页一键签到 + 关注吧分页查漏补签，实时进度、成功/失败数、失败吧名 + 原因分类
