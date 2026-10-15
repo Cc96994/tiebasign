@@ -13,7 +13,7 @@ source.dir = ./app
 source.include_exts = py,png
 source.exclude_dirs = p4a_local,vendor,scripts,bin,bin_probe,bin_m21,bin_m22,.buildozer,.git,__pycache__
 
-version = 0.3.0
+version = 0.4.0
 
 # Locked dependency chain (no kivy/sdl2 in the webview route).
 # Recipes: python3 3.12.7 / aiotieba 4.7.1 (local recipe, NDK crypto +
@@ -31,7 +31,7 @@ icon.filename = %(source.dir)s/icon.png
 android.api = 34
 android.minapi = 23
 android.archs = arm64-v8a
-android.permissions = INTERNET,FOREGROUND_SERVICE,FOREGROUND_SERVICE_DATA_SYNC,POST_NOTIFICATIONS
+android.permissions = INTERNET,FOREGROUND_SERVICE,FOREGROUND_SERVICE_DATA_SYNC,POST_NOTIFICATIONS,ACCESS_NETWORK_STATE,REQUEST_INSTALL_PACKAGES
 android.accept_sdk_license = True
 android.allow_backup = False
 android.release_artifact = apk

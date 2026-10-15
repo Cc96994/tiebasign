@@ -483,8 +483,17 @@ def _scheduler_loop():
         try:
             data = _load()
             enabled = bool(data["enabled"])
+            keepalive = enabled
+            if not keepalive:
+                # 水贴开启时同样需要前台服务：两次发送之间可能相隔很久，
+                # 进程被系统回收就会漏发。两边任一开启即保活。
+                try:
+                    import waterpost
+                    keepalive = waterpost.keepalive_needed()
+                except Exception:  # noqa: BLE001
+                    keepalive = False
             try:
-                if enabled:
+                if keepalive:
                     _ensure_keepalive(True)
                 else:
                     _ensure_keepalive(False)
@@ -519,6 +528,18 @@ def _scheduler_loop():
         except Exception as exc:  # noqa: BLE001
             _log("scheduler loop error: {} {}\n{}".format(
                 type(exc).__name__, exc, traceback.format_exc()))
+
+        # 每天一次的更新检查。放在这个循环里而不是另起一个定时器：这个循环
+        # 已经在跑，多一个定时器只多一处会被系统回收的东西。它自己判断
+        # "今天查过没有 / 失败后要不要等 1 小时"，失败完全静默（不弹通知、
+        # 不亮红点）。**不受 enabled 影响**：自动签到关着也该能收到更新提醒。
+        # 单独包一层 try：检查更新出任何问题都绝不能影响签到。
+        try:
+            import updater
+            updater.daily_tick()
+        except Exception as exc:  # noqa: BLE001
+            _log("updater tick error: {} {}".format(type(exc).__name__, exc))
+
         time.sleep(20)
 
 
