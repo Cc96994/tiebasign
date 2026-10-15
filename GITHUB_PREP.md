@@ -76,10 +76,18 @@ bash scripts/leak_scan.sh        # 要求 RESULT: CLEAN
 > `G:\学习\aiotieba\_quarantine\`（**那是还活着的登录凭据的明文副本**，
 > 掩码与 App 当前账号一致）。处置建议见那里的 `README.md`。
 
-## 5. 许可证：仍未选择
+## 5. 许可证：Apache-2.0（已确定）
 
-GitHub 上显示"无许可证"。建议 **Apache-2.0**（宽松 + 明确的专利授权）。决定后在仓库根
-放 `LICENSE` 即可。
+仓库根已有 `LICENSE`（Apache-2.0 全文，版权行 `Copyright 2026 Cc96994`），
+并已写入 `scripts/gen_github_src.sh` 的采集清单与必需项断言 —— 重新生成上传集会自带。
+
+- **两个平台都要有**：App 是双源更新，使用者可能从 GitHub 或 Gitee 任一平台获取，
+  授权必须跟着每一个分发副本走。**不要只在建仓时勾选 GitHub 的 "Add a license"** ——
+  那样只有 GitHub 有 LICENSE，从 Gitee 下载的人处在"默认保留所有权利"状态，
+  同一个项目在两个平台的法律授权会不一致。
+- **待补（排入 0.5.0）**：第三方依赖的许可证文本与署名。`chardet`（LGPL-2.1）与
+  `certifi`（MPL-2.0）属弱 copyleft，要求分发时附带其许可证文本；当前 APK 内不含任何
+  许可证文件。做法是增加 `THIRD-PARTY-NOTICES.md`。
 
 ## 6. 发布正式包（Release，不是 push）
 

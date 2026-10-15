@@ -1,7 +1,5 @@
 # 贴吧签到助手 (tieba_sign_android)
 
-本软件由AI生成，该软件仅用于网络编程、接口分析的个人技术学习研究目的，仅供学习，下载完请在24h内删除
-
 基于 [aiotieba](https://github.com/Starry-OvO/aiotieba) 4.7.1 的百度贴吧多账号签到 Android App（首期仅 Android）。
 
 - 一键签到：msign 网页一键签到 + 关注吧分页查漏补签，实时进度、成功/失败数、失败吧名 + 原因分类
@@ -13,8 +11,8 @@
 - 安全：BDUSS 只用 Android Keystore AES-GCM 加密存本机，任何页面不显示完整 BDUSS；不保存明文密码、无签到历史、无跨设备恢复
 
 ## 版本与下载
-- **线上正式版：0.4.0**（arm64-v8a，minSdk 23 / Android 8.0+，targetSdk 34）——
-  安装包在 **GitHub Releases** 下载：`tieba-sign-assistant-0.4.0-arm64-v8a-release.apk`（附 `SHA256SUMS`）
+- **线上正式版：0.3.0**（arm64-v8a，minSdk 23 / Android 8.0+，targetSdk 34）——
+  安装包在 **GitHub Releases** 下载：`tieba-sign-assistant-0.3.0-arm64-v8a-release.apk`（附 `SHA256SUMS`）
 - **0.4.0 已在本地构建并通过 `verify_release.sh` 全部核验，等上传**：
   `release/` 下已有 `tieba-sign-assistant-0.4.0-arm64-v8a-release.apk` + `update.json` + `SHA256SUMS`。
   发布时要**三个文件一起**挂到同一个 tag 下（`update.json` 是 App 判断版本与校验的关键，见下文）
@@ -95,6 +93,7 @@ APK、`update.json`（版本/versionCode/sha256，App 用它判版本）、`SHA2
 - 本项目不保存签到历史，不提供跨设备恢复；卸载应用或清除数据前请自行备份账号信息。
 
 ## 许可证
-- 本项目自身代码：目前未随仓库附带 LICENSE 文件；如打算公开分发，建议在创建仓库时选择 **Apache-2.0**（GitHub 会自动生成 LICENSE）。
-- 依赖：aiotieba / aiohttp / lxml / protobuf / cryptography 等，按各自许可证。
+- 本项目自身代码：**Apache-2.0**，全文见仓库根 `LICENSE`（Copyright 2026 Cc96994）。
+- **GitHub 与 Gitee 两个仓库都携带同一份 `LICENSE`**：本 App 是双源更新，使用者可能从任一平台获取，授权必须跟着每一个分发副本走。只在建仓时勾选 GitHub 的 "Add a license" 会造成两个平台的授权不一致。
+- 依赖：aiotieba（**The Unlicense**，公有领域）/ aiohttp / lxml / protobuf / cryptography 等，按各自许可证，详见 `CREDITS.md`。
 - 登录形态参考 TiebaLite（GPL-3.0）：仅参考公开网址与技术思路，未复制其代码，详见 `CREDITS.md`。
