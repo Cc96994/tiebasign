@@ -47,7 +47,7 @@ put_tree() {  # <dir relative to PROJ>
 
 echo "== collecting the upload set"
 # 顶层文档与构建配置
-for f in .gitignore buildozer_webview_app.spec README.md ROADMAP.md CREDITS.md \
+for f in .gitignore LICENSE buildozer_webview_app.spec README.md ROADMAP.md CREDITS.md \
          GITHUB_PREP.md SIGNING.md PRD_ACCEPTANCE_0.3.0.md; do
     put "$PROJ/$f"
 done
@@ -72,7 +72,7 @@ for must in java_src/org/dsh/tiebaweb/ApkProvider.java \
             java_src/PythonActivity.updater.inc \
             third_party/p4a-dev.tar.gz \
             third_party/p4a-webview-base-overlay.tar.gz \
-            .gitignore; do
+            .gitignore LICENSE; do
     [ -f "$NEW/$must" ] || fail "$must is not in the upload set"
 done
 n_scripts=$(find "$NEW/scripts" -type f 2>/dev/null | wc -l)
