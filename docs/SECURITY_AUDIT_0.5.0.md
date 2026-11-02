@@ -1,4 +1,4 @@
-﻿# BDUSS / 凭据泄露审计（v0.5.0）
+# BDUSS / 凭据泄露审计（v0.5.0）
 
 > 审计时间：2026-11-03
 > 对象：GitHub 仓库 `Cc96994/tiebasign`（含全部分支、tag、提交历史）与 App 源码。
@@ -17,6 +17,7 @@ App 的常规路径（Keystore 加密、界面只显示掩码）从 0.3.0 起就
 | 当前工作树（全部文本文件） | `bash scripts/leak_scan.sh`：`BDUSS=...` / `BDUSS%3D...` 值正则 + 文件名含 `BDUSS` 的规则；扫描根不存在或 0 文件会报错，不会假装 CLEAN |
 | Git 历史（全部分支 + tag） | 新增 `bash scripts/check_history_secrets.sh`：扫 `git log -p --all` 的值模式与 `git rev-list --objects --all` 的文件名；只输出计数，不输出命中内容 |
 | 已发布的 0.3.0 / 0.4.0 tag | 对每个 tag 执行 `git grep -I -E 'BDUSS(=|%3D)...'` |
+| 已发布的 0.4.0 APK（GitHub Releases 资产） | 下载 20,707,486 字节的 release APK，用 Python `zipfile` 扫全部条目与嵌套的 `assets/private.tar`（13 个 pyc/png）：查 `BDUSS=` 值、文件名含 `BDUSS`/`tiebasign_accounts`/`.keystore` 的条目；再抽查 150~220 字符裸 base64 形状 |
 | GitHub Release 说明 | 用 `gh release view` 读正文，只允许出现「BDUSS」这个名词，不允许出现值 |
 | 源码日志路径 | 逐文件检查 `print` / 日志 / 错误详情里与 BDUSS 相关的变量；只允许长度或掩码 |
 | App 数据文件 | `tiebasign_accounts.json` 只存 `bduss_enc`（Keystore AES-GCM 密文）与掩码；不存明文 |
@@ -28,11 +29,12 @@ App 的常规路径（Keystore 加密、界面只显示掩码）从 0.3.0 起就
 |---|---|
 | 工作树值模式 | **0 命中**（`RESULT: CLEAN`） |
 | 工作树文件名规则 | **0 个**含 `BDUSS` 的文件 |
-| Git 历史值模式 | **0 行命中**（10 个提交、2 个 tag） |
+| Git 历史值模式 | **0 行命中**（审计时 10 个提交、2 个 tag；PR 提交后 13 个提交复扫仍 CLEAN） |
 | Git 历史文件名 | **0 个** |
 | Release 说明 | 只有功能描述，没有值 |
 | 源码日志 | 只记录 `bduss_len` 或掩码 |
 | 0.3.0 / 0.4.0 tag | CLEAN |
+| 0.4.0 release APK | 25 个 zip 条目 + `private.tar` 13 个成员：**0 个** BDUSS 值、**0 个**账号/密钥文件；长 token 抽查只命中 `libsqlite3.so` 里的 `DATEIMME…`/`TIMESTAMP…` 常量，不是凭据 |
 
 v0.5.0 另外做了三处加固：
 
