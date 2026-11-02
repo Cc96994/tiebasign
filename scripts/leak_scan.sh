@@ -146,7 +146,7 @@ mapfile -t PYINST_ROOTS < <(discover_roots build/python-installs)
 if [ "${#DISTS_ROOTS[@]}" -eq 0 ]; then
     if [ -d "$PROJ_WSL/.buildozer" ] || [ -d "$BUILDER/android/platform" ]; then
         bad "buildozer has been used but no dists directory was found - path discovery is wrong, refusing to report clean"
-        note "looked for <project>/.buildozer/android/platform/build-*/dists and <BUILDER>/android/platform/build-*/dists"
+        echo "      looked for <project>/.buildozer/android/platform/build-*/dists and <BUILDER>/android/platform/build-*/dists"
     else
         warn "no buildozer dists yet (nothing built on this machine) - nothing to scan there"
     fi
@@ -173,6 +173,20 @@ scan_names 0 "sibling _legacy tree" "$SIBLING_LEGACY"
 # ---- packaged artifacts ----------------------------------------------------
 scan_apks 1 "project APKs" "$PROJ_ROOT"
 scan_apks 0 "sibling _legacy APKs" "$SIBLING_LEGACY"
+
+# ---- git history ----------------------------------------------------------
+# 工作树干净不等于历史干净：提交过再删掉，凭据仍然留在 GitHub 的历史里。
+# 不是 git 仓库时（用户本机是"重新整理上传"模式）明确 warn，不假装扫过。
+echo "== git history (BDUSS in past commits)"
+if [ -d "$PROJ_ROOT/.git" ]; then
+    if bash "$SCRIPT_DIR/check_history_secrets.sh" "$PROJ_ROOT"; then
+        ok "git history clean"
+    else
+        bad "git history contains credential-shaped data or filenames (see above)"
+    fi
+else
+    warn "not a git checkout - history scan skipped (worktree scan above still applies)"
+fi
 
 # ---- verdict ---------------------------------------------------------------
 echo
