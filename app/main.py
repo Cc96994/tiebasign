@@ -1836,6 +1836,13 @@ function failLine(f){
   if(f.code!==null&&f.code!==undefined){bits.push('错误码 '+f.code);}
   return bits.join(' · ');
 }
+function detailLine(f){
+  var d=(f.detail===null||f.detail===undefined)?'':String(f.detail);
+  var r=f.reason?String(f.reason):'';
+  // detail 里已经包含同一条原因时不再重复显示；只有百度原文/额外信息才单独一行。
+  if(r && d.indexOf(r)>=0){return '';}
+  return d;
+}
 function growthLine(g){
   if(!g){return '';}
   var ok=(g.status==='success'||g.status==='done');
@@ -1854,7 +1861,7 @@ function warningsCard(list){
     html+='<div style="border-bottom:1px solid rgba(127,127,127,.16);padding:9px 0">'+
       '<div style="font-weight:700;font-size:14px">'+escTxt(w.forum)+
       ' <span style="color:#E8930C;font-size:12px">'+escTxt(failLine(w))+'</span></div>'+
-      (w.detail?'<div class="hint">'+escTxt(w.detail)+'</div>':'')+
+      (detailLine(w)?'<div class="hint">'+escTxt(detailLine(w))+'</div>':'')+
       '</div>';
   }
   html+='<div class="hint">这些不是失败项，不影响签到结果。</div></div>';
@@ -1913,7 +1920,7 @@ function renderSingle(s){
         '<div style="font-weight:700">'+escTxt(f.forum)+
         ' <span style="color:'+c+';font-size:12px">'+escTxt(f.category)+'</span></div>'+
         (failLine(f)?'<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>':'')+
-        '<div class="hint">'+escTxt(f.detail)+'</div></div>';
+        (detailLine(f)?'<div class="hint">'+escTxt(detailLine(f))+'</div>':'')+'</div>';
     }
     if(s.failures.length>max){
       html+='<div class="hint">还有 '+(s.failures.length-max)+' 条未显示</div>';
@@ -2016,7 +2023,7 @@ function renderMulti(s){
         '<div style="font-weight:700">'+escTxt(f.account+' → '+f.forum)+
         ' <span style="color:'+c+';font-size:12px">'+escTxt(f.category)+'</span></div>'+
         (failLine(f)?'<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>':'')+
-        '<div class="hint">'+escTxt(f.detail)+'</div></div>';
+        (detailLine(f)?'<div class="hint">'+escTxt(detailLine(f))+'</div>':'')+'</div>';
     }
     if(allFails.length>max){
       html+='<div class="hint">还有 '+(allFails.length-max)+' 条未显示</div>';
