@@ -4,7 +4,7 @@
 
 | 平台 | 地址 | 现状 |
 |---|---|---|
-| GitHub | https://github.com/Cc96994/tiebasign | 有 v0.3.0 Release；**源码是 2026-08-25 的网页上传快照** |
+| GitHub | https://github.com/Cc96994/tiebasign | 有 V0.3.0 / V0.4.0 Release；源码已同步（0.5.0 待发布） |
 | Gitee | https://gitee.com/Cc96994/tiebasign | 有仓库；**还没有任何发行版** |
 
 APK 走 Releases 发布，**不要 push 进 git**。
