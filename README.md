@@ -97,3 +97,4 @@ APK、`update.json`（版本/versionCode/sha256，App 用它判版本）、`SHA2
 - **GitHub 与 Gitee 两个仓库都携带同一份 `LICENSE`**：本 App 是双源更新，使用者可能从任一平台获取，授权必须跟着每一个分发副本走。只在建仓时勾选 GitHub 的 "Add a license" 会造成两个平台的授权不一致。
 - 依赖：aiotieba（**The Unlicense**，公有领域）/ aiohttp / lxml / protobuf / cryptography 等，按各自许可证，详见 `CREDITS.md`。
 - 登录形态参考 TiebaLite（GPL-3.0）：仅参考公开网址与技术思路，未复制其代码，详见 `CREDITS.md`。
+<!-- superagent smoke test: 可删除 -->
