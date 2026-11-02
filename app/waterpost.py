@@ -63,6 +63,8 @@ import threading
 import time
 import traceback
 
+import redact
+
 _DATA_FILENAME = "tiebasign_waterpost.json"
 _SCHEMA = 2                 # 2 = 每账号一组目标帖 + 秒级间隔 + 补发开关
 
@@ -167,7 +169,8 @@ def _log(msg):
     try:
         with open(os.path.join(os.getcwd(), "waterpost.log"), "a",
                   encoding="utf-8") as fh:
-            fh.write("[{}] {}\n".format(time.strftime("%m-%d %H:%M:%S"), msg))
+            fh.write("[{}] {}\n".format(
+                time.strftime("%m-%d %H:%M:%S"), redact.scrub(str(msg))))
             fh.flush()
     except Exception:
         pass

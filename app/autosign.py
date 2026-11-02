@@ -22,6 +22,8 @@ import threading
 import time
 import traceback
 
+import redact
+
 _DATA_FILENAME = "tiebasign_autosign.json"
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
@@ -95,7 +97,8 @@ def _log(msg):
     try:
         with open(os.path.join(os.getcwd(), "autosign.log"), "a",
                   encoding="utf-8") as fh:
-            fh.write("[{}] {}\n".format(time.strftime("%m-%d %H:%M:%S"), msg))
+            fh.write("[{}] {}\n".format(
+                time.strftime("%m-%d %H:%M:%S"), redact.scrub(str(msg))))
             fh.flush()
     except Exception:
         pass
@@ -386,23 +389,30 @@ def _finalize(account, state):
     data = _load()
     msign = state.get("msign") or {}
     failures = list(state.get("failures") or [])
+    warnings = list(state.get("warnings") or [])
     failed = int(state.get("forum_failed") or 0)
     success = int(state.get("forum_success") or 0)
 
+    # msign 只是「批量快捷方式」：它失败后还会逐吧补签，补签成功就是成功。
+    # v0.5.0 之前这里把 msign 失败直接算成整体失败，导致「所有吧都签到了
+    # 却弹自动签到失败」的误报。现在它进 warnings，只展示、不判失败。
     if msign and msign.get("status") != "success":
-        failed += 1
-        failures.insert(0, {
-            "forum": "网页一键签到(msign)",
-            "category": msign.get("category") or "风控其他",
-            "code": msign.get("code"),
-            "detail": msign.get("detail") or "",
-        })
+        if not any(w.get("forum") == "网页一键签到(msign)"
+                   for w in warnings):
+            warnings.insert(0, {
+                "forum": "网页一键签到(msign)",
+                "category": msign.get("category") or "未知错误",
+                "code": msign.get("code"),
+                "reason": msign.get("reason"),
+                "detail": msign.get("detail") or "",
+            })
     if state.get("error"):
         failed += 1
         failures.append({
             "forum": "签到流程",
-            "category": (state.get("error") or {}).get("category") or "网络异常",
+            "category": (state.get("error") or {}).get("category") or "未知错误",
             "code": (state.get("error") or {}).get("code"),
+            "reason": (state.get("error") or {}).get("reason"),
             "detail": (state.get("error") or {}).get("detail") or "",
         })
 
@@ -413,6 +423,7 @@ def _finalize(account, state):
         "success": int(success),
         "failed": int(failed),
         "failures": failures[:50],
+        "warnings": warnings[:50],
         "dot_pending": bool(not ok and data["notify_dot"]),
     }
     data["results"][str(account["id"])] = snapshot
@@ -441,8 +452,11 @@ def _notify_text(account, snapshot):
         name, snapshot["success"], snapshot["failed"]))
     shown = []
     for f in snapshot["failures"][:3]:
-        shown.append("{}（{}）".format(f.get("forum", ""),
-                                       f.get("category", "")))
+        detail = f.get("reason") or f.get("detail") or ""
+        code = f.get("code")
+        if code is not None and "错误码 {}".format(code) not in detail:
+            detail = "错误码 {} {}".format(code, detail).strip()
+        shown.append("{}（{}）".format(f.get("forum", ""), detail))
     if shown:
         parts.append("；".join(shown))
     if len(snapshot["failures"]) > 3:

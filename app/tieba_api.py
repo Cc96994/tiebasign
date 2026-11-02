@@ -10,6 +10,9 @@ import asyncio
 import re
 import threading
 
+import redact
+import tieba_codes
+
 _loop = None
 _loop_lock = threading.Lock()
 
@@ -62,12 +65,18 @@ async def _validate_async(bduss):
         user = await client.get_self_info()
     err = getattr(user, "err", None)
     if err is not None:
-        code = getattr(err, "code", None)
-        msg = getattr(err, "msg", None) or str(err)
+        code = tieba_codes.parse_code(getattr(err, "code", None))
+        msg = redact.scrub(str(getattr(err, "msg", None) or err), bduss)
+        if code is None:
+            detail = msg or "百度未返回错误原因"
+        else:
+            detail = "{}（{}）".format(
+                msg or "百度未返回错误原因", tieba_codes.explain(code))
         return {
             "ok": False,
-            "category": "账号失效",
-            "detail": "百度返回错误 code={} msg={}".format(code, msg),
+            "category": tieba_codes.CAT_ACCOUNT,
+            "code": code,
+            "detail": redact.scrub(detail, bduss),
         }
     user_id = getattr(user, "user_id", None)
     user_name = getattr(user, "user_name", None)
@@ -102,7 +111,7 @@ def validate_bduss(bduss):
                 "detail": "验证超时（90s），请检查网络后重试"}
     except Exception as exc:  # noqa: BLE001
         name = type(exc).__name__
-        text = str(exc)
+        text = redact.scrub(str(exc), bduss)
         # transport-level problems: timeout / DNS / TLS / connection
         if any(k in (name + " " + text)
                for k in ("Timeout", "ClientConnector", "ClientOSError",
@@ -110,5 +119,5 @@ def validate_bduss(bduss):
                          "socket", "OSError")):
             return {"ok": False, "category": "网络异常",
                     "detail": "{}: {}".format(name, text[:300])}
-        return {"ok": False, "category": "风控其他",
+        return {"ok": False, "category": "未知错误",
                 "detail": "{}: {}".format(name, text[:300])}

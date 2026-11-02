@@ -151,6 +151,18 @@ def page_content_checks():
     check("_update_dot() 读不到状态时不抛异常",
           main._update_dot() in (True, False))
 
+    # v0.5.0：签到页要有报告入口，报告页要能渲染（失败详情导出）
+    sign_html = main._page_sign()
+    check("签到页有「查看签到报告」入口", "/sign/report" in sign_html)
+    report_html = main._page_sign_report()
+    check("签到报告页能渲染",
+          "签到报告" in report_html and "copy_report" in report_html,
+          report_html[:200])
+    check("签到报告页说明已脱敏", "BDUSS" in report_html and "掩码" in report_html)
+    check("签到页 JS 展示成长等级签到", "成长等级签到" in main._JS_SIGN)
+    check("签到页 JS 展示错误码", "错误码" in main._JS_SIGN)
+    check("签到页 JS 有提醒区（warnings）", "warningsCard" in main._JS_SIGN)
+
     # 更新页：按钮与文案
     set_state(phase="available",
               latest={"version": "0.5.0", "version_code": 1023500})
@@ -163,7 +175,7 @@ def page_content_checks():
     check("更新页把两个源的说明写出来",
           "GitHub" in page and "Gitee" in page)
     check("更新页显示当前版本",
-          "当前版本" in page and "0.4.0" in page, page[:200])
+          "当前版本" in page and updater._APP_VERSION in page, page[:200])
 
     set_state(phase="ready",
               downloaded={"path": "/data/app/update/a.apk", "size": 20670000,
@@ -216,9 +228,14 @@ def http_checks():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = "http://127.0.0.1:{}".format(port)
+    # 显式绕过 http_proxy：某些环境（WSL/公司代理）会把 127.0.0.1 也交给
+    # 代理，结果代理返回 502，看起来像 App 服务坏了。这是测试环境问题，
+    # 不是产品行为，所以只在这个自检里禁用代理。
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}))
 
     def get(path):
-        with urllib.request.urlopen(base + path, timeout=10) as resp:
+        with opener.open(base + path, timeout=10) as resp:
             return resp.status, resp.read().decode("utf-8")
 
     def post(path, obj):
@@ -226,7 +243,7 @@ def http_checks():
             base + path, data=json.dumps(obj or {}).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with opener.open(req, timeout=10) as resp:
                 return resp.status, json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))
@@ -238,6 +255,9 @@ def http_checks():
         status, body = get("/settings/update")
         check("GET /settings/update 200 且是完整页面",
               status == 200 and "up_check" in body and "</html>" in body)
+        status, body = get("/sign/report")
+        check("GET /sign/report 200 且是完整页面",
+              status == 200 and "复制报告" in body and "</html>" in body)
         status, body = get("/api/update/state")
         state = json.loads(body)["state"]
         check("GET /api/update/state 200",

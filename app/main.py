@@ -428,7 +428,10 @@ def _page_sign():
             "<div class='topbar'>签到</div><main>"
             "<div class='empty'><p style='font-size:17px;font-weight:700'>"
             "还没有可用账号</p><p>先添加一个百度账号，再回来签到。</p></div>"
-            "<a class='btn btn-primary' href='/add'>＋ 添加账号</a></main>"
+            "<a class='btn btn-primary' href='/add'>＋ 添加账号</a>"
+            "<div class='hint' style='margin-top:10px'>"
+            "<a href='/sign/report'>查看 / 复制最近一次签到报告</a></div>"
+            "</main>"
         )
         return _page("签到", body, "sign")
 
@@ -481,11 +484,14 @@ def _page_sign():
         "这一组勾选同时用于下面的「一键签到」和「一键水贴」。</div>"
         "{}</div>"
         "<div class='card'><div class='title'>一键签到</div>"
-        "<div class='hint'>网页一键签到 + 关注吧查漏补签，单次执行不重试。"
-        "结果只显示在下方；手动签到失败不会发系统通知、不显示红点。</div>"
+        "<div class='hint'>网页一键签到 + 关注吧查漏补签（并发请求，单次执行"
+        "不重试）。失败会给出<b>错误码和原因</b>；结果只显示在下方，"
+        "手动签到失败不会发系统通知、不显示红点。</div>"
         "<div class='btn-row' style='margin-top:12px'>"
         "<button class='btn btn-primary' id='sign_btn' type='button'>"
-        "开始一键签到</button></div></div>"
+        "开始一键签到</button></div>"
+        "<div class='hint' style='margin-top:10px'>"
+        "<a href='/sign/report'>查看 / 复制最近一次签到报告</a></div></div>"
         "<div id='sign_state'></div>"
         "<div class='card'><div class='title'>一键水贴</div>"
         "<div class='hint'>立刻把勾选账号<b>今天还差几条</b>一次发完。比如设置"
@@ -501,6 +507,49 @@ def _page_sign():
             "".join(rows), _JS_SIGN)
     )
     return _page("签到", body, "sign")
+
+
+def _page_sign_report():
+    """最近一次签到报告（纯文本 + 一键复制）。报告本身不含完整 BDUSS。"""
+    text = signer.report_text()
+    body = (
+        "<div class='topbar'>签到报告</div><main>"
+        "<div class='card'><div class='title'>最近一次签到详情</div>"
+        "<div class='hint'>逐吧失败会带错误码和中文原因；报告已脱敏，"
+        "只保留 BDUSS 掩码，可以直接复制发给开发者。</div>"
+        "<pre id='report_text' style='white-space:pre-wrap;word-break:break-word;"
+        "font-size:13px;line-height:1.55;background:rgba(127,127,127,.08);"
+        "border-radius:12px;padding:12px;margin-top:12px'>"
+        "{}</pre>"
+        "<div class='btn-row' style='margin-top:12px'>"
+        "<button class='btn btn-primary' id='copy_report' type='button'>"
+        "复制报告</button>"
+        "<a class='btn btn-ghost' href='/sign'>返回签到页</a></div>"
+        "<div class='hint' id='copy_hint' style='margin-top:8px'></div>"
+        "</div></main>"
+        "<script>"
+        "function show(msg){{var h=document.getElementById('copy_hint');"
+        "if(h){{h.textContent=msg;}}}}"
+        "function copyReport(){{"
+        "var pre=document.getElementById('report_text');"
+        "var text=pre?pre.innerText:'';"
+        "if(navigator.clipboard&&navigator.clipboard.writeText){{"
+        "navigator.clipboard.writeText(text).then(function(){{"
+        "show('已复制，可以直接粘贴发送。');}}).catch(function(){{"
+        "fallbackCopy(pre,text);}});"
+        "}}else{{fallbackCopy(pre,text);}}"
+        "}}"
+        "function fallbackCopy(pre,text){{"
+        "try{{var r=document.createRange();r.selectNodeContents(pre);"
+        "var s=window.getSelection();s.removeAllRanges();s.addRange(r);"
+        "document.execCommand('copy');show('已复制，可以直接粘贴发送。');"
+        "}}catch(e){{show('复制失败：请长按上方文字手动选择。');}}"
+        "}}"
+        "var b=document.getElementById('copy_report');"
+        "if(b){{b.addEventListener('click',copyReport);}}"
+        "</script>"
+    ).format(html.escape(text))
+    return _page("签到报告", body, "sign")
 
 
 def _page_settings():
@@ -531,7 +580,7 @@ def _page_settings():
         "<span>自动水贴设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.4.0 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.5.0 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -750,20 +799,34 @@ def _page_settings_auto():
         color = C_OK if r["ok"] else C_FAIL
         label = "全部成功" if r["ok"] else "有失败"
         fail_txt = ""
-        if r["failures"]:
-            shown = "；".join("{}（{}）".format(f.get("forum", ""),
-                                                f.get("category", ""))
-                              for f in r["failures"][:3])
+        if r.get("failures"):
+            shown = "；".join(
+                "{}（{}）".format(
+                    f.get("forum", ""),
+                    "错误码 {} {}".format(f.get("code"),
+                                          f.get("reason") or "").strip()
+                    if f.get("code") is not None
+                    else f.get("category", ""))
+                for f in r["failures"][:3])
             fail_txt = ("<div class='hint'>" + html.escape(shown) + "</div>")
+        warn_txt = ""
+        if r.get("warnings"):
+            shown_w = "；".join(
+                "{}（{}）".format(
+                    w.get("forum", ""),
+                    w.get("reason") or w.get("category", ""))
+                for w in r["warnings"][:2])
+            warn_txt = ("<div class='hint' style='color:{}'>提醒：{}</div>".format(
+                C_WARN, html.escape(shown_w)))
         result_rows.append(
             "<div class='card'><div class='acct'>"
             "<div class='info'><div class='name'>{}</div>"
             "<div class='mask'>{}</div></div>"
             "<span class='badge' style='background:{}'>{}</span></div>"
-            "<div class='hint'>成功 {} · 失败 {}{}</div></div>".format(
+            "<div class='hint'>成功 {} · 失败 {}{}{}</div></div>".format(
                 html.escape(r["name"] or "贴吧账号"),
                 html.escape(r["ts"]),
-                color, label, r["success"], r["failed"], fail_txt)
+                color, label, r["success"], r["failed"], fail_txt, warn_txt)
         )
     if not result_rows:
         result_rows.append(
@@ -1229,6 +1292,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
                 _send_html(self, _page_sign())
+            elif path == "/sign/report":
+                _send_html(self, _page_sign_report())
             elif path == "/settings":
                 _send_html(self, _page_settings())
             elif path == "/settings/auto":
@@ -1757,11 +1822,43 @@ function renameAcct(id, oldName){
 _JS_SIGN = """
 <script>
 var CAT_COLOR = {"已签到":"#E8930C", "未关注":"#E8930C",
-  "账号失效":"#E5484D", "网络异常":"#E5484D", "风控其他":"#E5484D"};
+  "吧不存在":"#E5484D", "账号失效":"#E5484D", "需要验证码":"#E5484D",
+  "网络异常":"#E5484D", "风控限制":"#E5484D", "未知错误":"#E5484D"};
 function escTxt(s){
   var d=document.createElement('div');
   d.textContent=(s===null||s===undefined)?'':String(s);
   return d.innerHTML;
+}
+function failLine(f){
+  var bits=[];
+  if(f.category){bits.push(f.category);}
+  if(f.reason){bits.push(f.reason);}
+  if(f.code!==null&&f.code!==undefined){bits.push('错误码 '+f.code);}
+  return bits.join(' · ');
+}
+function growthLine(g){
+  if(!g){return '';}
+  var ok=(g.status==='success'||g.status==='done');
+  var c=ok?'#0BA36B':'#E8930C';
+  var t=g.status==='success'?'成功':
+    (g.status==='done'?'今天已经签到过了':
+     escTxt(g.detail||failLine(g)||'失败'));
+  return '<div class="hint" style="color:'+c+';font-weight:700;margin-top:6px">'+
+    '成长等级签到：'+t+'</div>';
+}
+function warningsCard(list){
+  if(!list||list.length===0){return '';}
+  var html='<div class="card"><div class="title">提醒（'+list.length+'）</div>';
+  for(var i=0;i<list.length;i++){
+    var w=list[i];
+    html+='<div style="border-bottom:1px solid rgba(127,127,127,.16);padding:9px 0">'+
+      '<div style="font-weight:700;font-size:14px">'+escTxt(w.forum)+
+      ' <span style="color:#E8930C;font-size:12px">'+escTxt(failLine(w))+'</span></div>'+
+      (w.detail?'<div class="hint">'+escTxt(w.detail)+'</div>':'')+
+      '</div>';
+  }
+  html+='<div class="hint">这些不是失败项，不影响签到结果。</div></div>';
+  return html;
 }
 function renderSingle(s){
   var box=document.getElementById('sign_state');
@@ -1782,8 +1879,9 @@ function renderSingle(s){
     var color=(m.status==='success')?'#0BA36B':(CAT_COLOR[m.category]||'#E5484D');
     html+='<div class="hint" style="color:'+color+';font-weight:700;margin-top:8px">'+
       '网页一键签到：'+(m.status==='success'?'成功':
-      escTxt((m.category||'')+' - '+(m.detail||'')))+'</div>';
+      escTxt(m.detail||failLine(m)||'失败'))+'</div>';
   }
+  html+=growthLine(s.growth);
   if(s.status==='done'){
     html+='<div style="display:flex;gap:10px;margin-top:14px">';
     html+='<div style="flex:1;text-align:center;background:rgba(11,163,107,.12);'+
@@ -1804,6 +1902,7 @@ function renderSingle(s){
       '签到未完成：'+escTxt((e.category?(e.category+'：'):'')+(e.detail||''))+'</div>';
   }
   html+='</div>';
+  html+=warningsCard(s.warnings);
   if(s.failures && s.failures.length>0){
     html+='<div class="card"><div class="title">失败详情（'+s.failures.length+'）</div>';
     var max=Math.min(s.failures.length,100);
@@ -1813,6 +1912,7 @@ function renderSingle(s){
       html+='<div style="border-bottom:1px solid rgba(0,0,0,.06);padding:10px 0">'+
         '<div style="font-weight:700">'+escTxt(f.forum)+
         ' <span style="color:'+c+';font-size:12px">'+escTxt(f.category)+'</span></div>'+
+        (failLine(f)?'<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>':'')+
         '<div class="hint">'+escTxt(f.detail)+'</div></div>';
     }
     if(s.failures.length>max){
@@ -1836,7 +1936,7 @@ function renderMulti(s){
   var done=s.account_done||0;
   var total=s.account_total||(s.accounts?s.accounts.length:0);
   html+='<div class="hint">账号进度 '+done+' / '+total+'</div>';
-  var aggS=0,aggF=0,allFails=[];
+  var aggS=0,aggF=0,allFails=[],allWarnings=[];
   if(s.accounts){
     for(var i=0;i<s.accounts.length;i++){
       var a=s.accounts[i];
@@ -1861,8 +1961,9 @@ function renderMulti(s){
         var mc=(m.status==='success')?'#0BA36B':(CAT_COLOR[m.category]||'#E5484D');
         html+='<div class="hint" style="color:'+mc+';font-weight:700;margin-top:6px">'+
           '网页一键签到：'+(m.status==='success'?'成功':
-          escTxt((m.category||'')+' - '+(m.detail||'')))+'</div>';
+          escTxt(m.detail||failLine(m)||'失败'))+'</div>';
       }
+      html+=growthLine(a.growth);
       if(a.status==='done'){
         html+='<div class="hint" style="margin-top:6px">补签成功 '+
           (a.forum_success||0)+' · 补签失败 '+(a.forum_failed||0)+'</div>';
@@ -1877,7 +1978,16 @@ function renderMulti(s){
         for(var k=0;k<a.failures.length;k++){
           var f=a.failures[k];
           allFails.push({account:a.account_name,forum:f.forum,
-            category:f.category,detail:f.detail});
+            category:f.category,code:f.code,reason:f.reason,detail:f.detail});
+        }
+      }
+      if(a.warnings && a.warnings.length>0){
+        for(var w=0;w<a.warnings.length;w++){
+          var wn=a.warnings[w];
+          allWarnings.push({account:a.account_name,
+            forum:a.account_name+' → '+wn.forum,
+            category:wn.category,code:wn.code,reason:wn.reason,
+            detail:wn.detail});
         }
       }
     }
@@ -1895,6 +2005,7 @@ function renderMulti(s){
     html+='</div>';
   }
   html+='</div>';
+  html+=warningsCard(allWarnings);
   if(allFails.length>0){
     html+='<div class="card"><div class="title">失败详情（'+allFails.length+'）</div>';
     var max=Math.min(allFails.length,100);
@@ -1904,6 +2015,7 @@ function renderMulti(s){
       html+='<div style="border-bottom:1px solid rgba(0,0,0,.06);padding:10px 0">'+
         '<div style="font-weight:700">'+escTxt(f.account+' → '+f.forum)+
         ' <span style="color:'+c+';font-size:12px">'+escTxt(f.category)+'</span></div>'+
+        (failLine(f)?'<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>':'')+
         '<div class="hint">'+escTxt(f.detail)+'</div></div>';
     }
     if(allFails.length>max){
