@@ -59,8 +59,12 @@ def _next_id(data):
 
 
 def _public(a):
+    try:
+        aid = int(a["id"])
+    except (KeyError, TypeError, ValueError):
+        aid = a.get("id")
     return {
-        "id": a["id"],
+        "id": aid,
         "name": a.get("name", ""),
         "mask": a.get("mask", ""),
         "is_current": bool(a.get("is_current", False)),

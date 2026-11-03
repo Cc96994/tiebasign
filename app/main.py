@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """TiebaSign M2.2.2 - account module (webview bootstrap).
 
 Local HTTP UI on 127.0.0.1:5000. PRD pages:
@@ -606,7 +606,7 @@ def _page_settings():
         "<span>吧群签到设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.5.3 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.5.4 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -1702,7 +1702,13 @@ class AppHandler(BaseHTTPRequestHandler):
             return None, {"ok": False, "category": "未选择",
                           "detail": "请至少勾选一个账号"}
         all_accounts = storage.list_accounts()
-        selected = [a for a in all_accounts if a.get("id") in wanted]
+        selected = []
+        for a in all_accounts:
+            try:
+                if int(a.get("id")) in wanted:
+                    selected.append(a)
+            except (TypeError, ValueError):
+                continue
         if not selected:
             return None, {"ok": False, "category": "无账号",
                           "detail": "勾选的账号不存在，请刷新后重试"}
@@ -2603,8 +2609,19 @@ function renderGsState(s){
   var box=document.getElementById('gs_state');
   if(!btn||!box){return;}
   if(!s||s.status==='idle'){
+    var conf=(s&&s.configured)||{};
+    var keys=Object.keys(conf);
+    var confLine='';
+    if(keys.length){
+      confLine='<div class="hint">已配置群：'+keys.map(function(k){
+        return 'id='+escTxt(k)+'（'+conf[k]+' 个群）';}).join('、')+'</div>';
+    }else{
+      confLine='<div class="hint" style="color:#E8930C">还没有配置任何群；'+
+        '请先到「吧群签到设置」添加。</div>';
+    }
     box.innerHTML='<div class="card"><div class="hint">按「吧群签到设置」里的群发送'+
-      '自定义消息；每个群每天发送成功后不再发。失败可重试，每天最多 3 次。</div></div>';
+      '自定义消息；每个群每天发送成功后不再发。失败可重试，每天最多 3 次。</div>'+
+      confLine+'</div>';
     btn.disabled=false; btn.textContent='开始吧群签到';
     return;
   }

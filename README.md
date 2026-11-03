@@ -1,4 +1,4 @@
-# 贴吧签到助手 (tieba_sign_android)
+﻿# 贴吧签到助手 (tieba_sign_android)
 
 基于 [aiotieba](https://github.com/Starry-OvO/aiotieba) 4.7.1 的百度贴吧多账号签到 Android App（首期仅 Android）。
 
@@ -11,13 +11,13 @@
 - 自动水贴：**每个账号带自己的一组目标帖**（一个账号只发自己那组）；某账号当天签到完成后才开始，按固定间隔（默认 5 秒）发主楼回复，每天每帖默认 4 次；文案可自定义并顺序轮换/随机
 - 一键水贴：签到页上把勾选账号**当天还差的次数**一次发完（发满后当天不再自动发）
 - 检查更新：GitHub 优先 + Gitee 备胎双源、每天自动查一次、**没查到什么都不提示**、查到才亮红点 + 弹通知；下载后校验 sha256，安装前再验包名/versionCode/**签名指纹**，然后唤醒系统安装界面（不做静默安装）
-- 安全：BDUSS 只用 Android Keystore AES-GCM 加密存本机，任何页面不显示完整 BDUSS；日志/报告统一脱敏；不保存明文密码、无签到历史、无跨设备恢复（历史泄漏审计见 `docs/SECURITY_AUDIT_0.5.3.md`）
+- 安全：BDUSS 只用 Android Keystore AES-GCM 加密存本机，任何页面不显示完整 BDUSS；日志/报告统一脱敏；不保存明文密码、无签到历史、无跨设备恢复（历史泄漏审计见 `docs/SECURITY_AUDIT_0.5.4.md`）
 
 ## 版本与下载
 - **线上正式版：0.4.0**（arm64-v8a，minSdk 23 / Android 8.0+，targetSdk 34）——
   安装包在 **GitHub Releases** 下载：`tieba-sign-assistant-0.4.0-arm64-v8a-release.apk`（附 `update.json` / `SHA256SUMS`）
-- **0.5.3 源码已完成，待构建与发布**：版本号已同步到 spec / 界面 / updater 三处
-  （versionCode 1023503）。构建后按 `GITHUB_PREP.md` 把 APK + `update.json` + `SHA256SUMS`
+- **0.5.4 源码已完成，待构建与发布**：版本号已同步到 spec / 界面 / updater 三处
+  （versionCode 1023504）。构建后按 `GITHUB_PREP.md` 把 APK + `update.json` + `SHA256SUMS`
   三个文件一起挂到同一个 tag 下（`update.json` 是 App 判断版本与校验的关键，见下文）
 - 若手机安装过同版本 debug 测试包，请先卸载再安装正式版（签名不同）
 

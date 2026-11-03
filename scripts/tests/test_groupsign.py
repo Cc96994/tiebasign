@@ -172,6 +172,12 @@ def test_no_groups_and_disabled():
     seed([])
     result = run(FakeClient())
     check("没有群 -> empty", result["status"] == "empty", result)
+    check("没有群 -> 有明确提示", "还没有配置" in (result.get("detail") or ""),
+          result)
+    groupsign._state = None
+    rid, err = groupsign.start([(ACCOUNT, "x")])
+    check("没有群时按钮直接说明原因",
+          rid is None and "还没有配置任何群" in (err or ""), err)
 
     seed([group(1, 2)])
     data = groupsign._load()
@@ -181,6 +187,10 @@ def test_no_groups_and_disabled():
     result = run(client)
     check("关闭开关 -> disabled", result["status"] == "disabled", result)
     check("关闭开关 -> 不发送", client.sent == [], client.sent)
+    groupsign._state = None
+    rid, err = groupsign.start([(ACCOUNT, "x")])
+    check("关闭开关时按钮提示去启用",
+          rid is None and "开关没有打开" in (err or ""), err)
 
 
 def test_add_parse_and_manage():

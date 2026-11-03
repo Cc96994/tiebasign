@@ -182,6 +182,17 @@ def _account(data, account_id):
     return acct
 
 
+def _configured_counts(data=None):
+    """返回 {账号id: 群数量}，只列有群的账号；给签到页/启动前诊断用。"""
+    data = data if data is not None else _load()
+    out = {}
+    for aid, acct in (data.get("accounts") or {}).items():
+        n = len(acct.get("groups") or [])
+        if n:
+            out[str(aid)] = n
+    return out
+
+
 def get_settings():
     data = _load()
     accounts = []
@@ -382,7 +393,9 @@ async def run_account_async(client, account, secret=None):
     groups = list(acct.get("groups") or [])
     if not groups:
         return {"status": "empty", "sent": 0, "skipped": 0,
-                "failed": 0, "total": 0, "details": [], "warnings": []}
+                "failed": 0, "total": 0, "details": [], "warnings": [],
+                "detail": ("这个账号（id={}）还没有配置群；"
+                           "请到「吧群签到设置」添加群").format(aid)}
 
     today = _today()
     sent = skipped = failed = 0
@@ -528,7 +541,8 @@ def _new_state(run_id, pairs):
 def get_state():
     with _lock:
         if _state is None:
-            return {"status": "idle"}
+            return {"status": "idle",
+                    "configured": _configured_counts()}
         snap = dict(_state)
         snap["accounts"] = []
         for sub in _state["accounts"]:
@@ -563,6 +577,25 @@ def start(pairs):
             return None, "吧群签到正在进行，请等待完成"
         if not pairs:
             return None, "未选择要执行吧群签到的账号"
+        data = _load()
+        if not data["enabled"]:
+            return None, ("吧群签到开关没有打开，请到「吧群签到设置」"
+                          "勾选「启用吧群签到」并保存")
+        counts = _configured_counts(data)
+        missing = [account["id"] for account, _b in pairs
+                   if not ((data["accounts"].get(str(account["id"])) or {})
+                           .get("groups"))]
+        if len(missing) == len(pairs):
+            if counts:
+                detail = ("选中的账号都还没有配置群；已配置群的账号：{}。"
+                          "请到「吧群签到设置」给选中的账号添加群，"
+                          "或在签到页勾选已配置群的账号。").format(
+                              "、".join("id={}（{} 个群）".format(k, v)
+                                       for k, v in sorted(counts.items())))
+            else:
+                detail = ("还没有配置任何群。请到「吧群签到设置」粘贴群分享"
+                          "链接（或手填 chatroom_id 和吧ID）并添加群。")
+            return None, detail
         _run_counter += 1
         run_id = "gs{:d}".format(_run_counter)
         _state = _new_state(run_id, pairs)
@@ -578,15 +611,25 @@ def start(pairs):
                 _run_one(account, bduss), loop)
             try:
                 result = future.result(timeout=1800)
-                _update_account(
-                    account["id"], status=(
-                        "done" if result.get("status") != "error" else "error"),
-                    step="完成", total=result.get("total") or 0,
-                    sent=result.get("sent") or 0,
-                    skipped=result.get("skipped") or 0,
-                    failed=result.get("failed") or 0,
-                    details=result.get("details") or [],
-                    warnings=result.get("warnings") or [])
+                kwargs = {
+                    "status": ("done" if result.get("status") not in
+                               ("error", "empty") else "error"),
+                    "step": "完成",
+                    "total": result.get("total") or 0,
+                    "sent": result.get("sent") or 0,
+                    "skipped": result.get("skipped") or 0,
+                    "failed": result.get("failed") or 0,
+                    "details": result.get("details") or [],
+                    "warnings": result.get("warnings") or [],
+                }
+                if result.get("status") == "empty":
+                    kwargs["error"] = {
+                        "detail": result.get("detail")
+                        or "这个账号还没有配置群"}
+                elif result.get("status") == "error":
+                    kwargs["error"] = result.get("error") or {
+                        "detail": "吧群签到没有完成"}
+                _update_account(account["id"], **kwargs)
             except asyncio.TimeoutError:
                 _update_account(account["id"], status="error",
                                 step="超时",

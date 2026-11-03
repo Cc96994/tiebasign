@@ -1,4 +1,4 @@
-# TiebaSign M2.2 WebView app build (final-app runtime chain + Keystore/Cookie
+﻿# TiebaSign M2.2 WebView app build (final-app runtime chain + Keystore/Cookie
 # Manager tech check). NOTE: this project NEVER contains BDUSS, BDUSS.txt or
 # old plain-text files. Bootstrap = webview (proven on HarmonyOS 卓易通),
 # UI served by Python on http://127.0.0.1:5000/ (p4a WebViewLoader port).
@@ -13,7 +13,7 @@ source.dir = ./app
 source.include_exts = py,png
 source.exclude_dirs = p4a_local,vendor,scripts,bin,bin_probe,bin_m21,bin_m22,.buildozer,.git,__pycache__
 
-version = 0.5.3
+version = 0.5.4
 
 # Locked dependency chain (no kivy/sdl2 in the webview route).
 # Recipes: python3 3.12.7 / aiotieba 4.7.1 (local recipe, NDK crypto +
