@@ -162,6 +162,10 @@ def page_content_checks():
     check("签到页 JS 展示成长等级签到", "成长等级签到" in main._JS_SIGN)
     check("签到页 JS 展示错误码", "错误码" in main._JS_SIGN)
     check("签到页 JS 有提醒区（warnings）", "warningsCard" in main._JS_SIGN)
+    check("签到页 JS 展示随机点赞", "随机点赞" in main._JS_SIGN)
+    auto_html = main._page_settings_auto()
+    check("自动签到页有「每日随机点赞」开关",
+          "id='daily_like'" in auto_html and "每日随机点赞" in auto_html)
 
     # 更新页：按钮与文案
     set_state(phase="available",
@@ -270,6 +274,10 @@ def http_checks():
         status, body = post("/api/update/settings", {"auto_check": False})
         check("POST 设置成功", status == 200 and body["ok"] is True)
         check("设置真的生效了", updater.get_settings()["auto_check"] is False)
+        status, body = post("/api/auto/settings", {"daily_like": False})
+        check("每日随机点赞开关可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["daily_like"] is False, body)
         status, body = post("/api/update/settings", {"download_mode": "bogus"})
         check("非法下载来源被拒（400）",
               status == 400 and body["ok"] is False, (status, body))

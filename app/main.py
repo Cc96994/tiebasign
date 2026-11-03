@@ -853,6 +853,11 @@ def _page_settings_auto():
         "<input type='checkbox' id='notify_dot'{}></label>"
         "<div class='hint'>自动签到全部成功时不会提醒；只有出现失败才按上面两个"
         "开关分别通知。手动签到永不通知、永不出红点。</div></div>"
+        "<div class='card'><div class='title'>每日随机点赞</div>"
+        "<label class='menu-item'><span>每个账号每天随机点赞 1 个帖子</span>"
+        "<input type='checkbox' id='daily_like'{}></label>"
+        "<div class='hint'>从该账号关注吧的最新主题帖里随机选一个，只点主楼赞；"
+        "每天最多 1 次。点赞失败不影响签到结果，也不会发通知。</div></div>"
         "<div class='card'><div class='title'>各账号时间</div>{}</div>"
         "<div class='card'><div class='title'>最近一次自动签到结果</div>{}</div>"
         "<div class='btn-row'>"
@@ -870,6 +875,7 @@ def _page_settings_auto():
         html.escape(st["global_time"]),
         " checked" if st["notify_system"] else "",
         " checked" if st["notify_dot"] else "",
+        " checked" if st.get("daily_like", True) else "",
         "".join(acc_rows), "".join(result_rows))
     script = """
 <script>
@@ -894,6 +900,7 @@ var payload={enabled:document.getElementById('enabled').checked,
 global_time:document.getElementById('global_time').value,
 notify_system:document.getElementById('notify_system').checked,
 notify_dot:document.getElementById('notify_dot').checked,
+daily_like:document.getElementById('daily_like').checked,
 accounts:collectAccounts()};
 fetch('/api/auto/settings',{method:'POST',
 headers:{'Content-Type':'application/json'},
@@ -1508,6 +1515,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "global_time": gt or None,
                 "notify_system": data.get("notify_system"),
                 "notify_dot": data.get("notify_dot"),
+                "daily_like": data.get("daily_like"),
                 "accounts": data.get("accounts"),
             })
             if "enabled" in data:
@@ -1853,6 +1861,20 @@ function growthLine(g){
   return '<div class="hint" style="color:'+c+';font-weight:700;margin-top:6px">'+
     '成长等级签到：'+t+'</div>';
 }
+function likeLine(l){
+  if(!l||l.status==='disabled'){return '';}
+  if(l.status==='success'){
+    return '<div class="hint" style="color:#0BA36B;font-weight:700;margin-top:6px">'+
+      '随机点赞：成功（'+escTxt(l.fname||'')+
+      (l.tid?' / tid '+l.tid:'')+'）</div>';
+  }
+  if(l.status==='done'){
+    return '<div class="hint" style="color:#0BA36B;font-weight:700;margin-top:6px">'+
+      '随机点赞：今天已经完成</div>';
+  }
+  /* error 由下面的「提醒」卡片统一展示，避免重复 */
+  return '';
+}
 function warningsCard(list){
   if(!list||list.length===0){return '';}
   var html='<div class="card"><div class="title">提醒（'+list.length+'）</div>';
@@ -1889,6 +1911,7 @@ function renderSingle(s){
       escTxt(m.detail||failLine(m)||'失败'))+'</div>';
   }
   html+=growthLine(s.growth);
+  html+=likeLine(s.like);
   if(s.status==='done'){
     html+='<div style="display:flex;gap:10px;margin-top:14px">';
     html+='<div style="flex:1;text-align:center;background:rgba(11,163,107,.12);'+
@@ -1971,6 +1994,7 @@ function renderMulti(s){
           escTxt(m.detail||failLine(m)||'失败'))+'</div>';
       }
       html+=growthLine(a.growth);
+      html+=likeLine(a.like);
       if(a.status==='done'){
         html+='<div class="hint" style="margin-top:6px">补签成功 '+
           (a.forum_success||0)+' · 补签失败 '+(a.forum_failed||0)+'</div>';

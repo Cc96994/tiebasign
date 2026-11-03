@@ -104,6 +104,7 @@ def _new_state(run_id, account):
         "finished_at": None,
         "msign": None,          # {"status","category","code","reason","detail"}
         "growth": None,         # 成长等级签到（4.7.1 的 sign_growth）结果
+        "like": None,           # 每日随机点赞结果
         "forum_total": 0,       # forums that still needed signing
         "forum_checked": 0,
         "forum_success": 0,
@@ -458,6 +459,37 @@ async def _sign_async(state, bduss):
             # ---- 4. sign each still-unsigned forum (single attempt) ------
             await _sign_forums(client, state, to_sign, secret)
 
+            # ---- 5. 每日随机点赞（旁路，失败只记 warning） ---------------
+            try:
+                import liker
+                like = await liker.maybe_like_async(
+                    client,
+                    {"id": state.get("account_id"),
+                     "name": state.get("account_name"),
+                     "mask": state.get("account_mask")},
+                    forums, secret)
+                _update_in(state, like=like)
+                if like.get("status") == "error":
+                    state["warnings"].append({
+                        "forum": "随机点赞",
+                        "category": like.get("category") or "未知错误",
+                        "code": like.get("code"),
+                        "reason": like.get("reason"),
+                        "detail": like.get("detail") or "",
+                    })
+                    _log("like failed detail={}".format(
+                        like.get("detail")), secret)
+                elif like.get("status") == "success":
+                    _log("like ok fname={} tid={}".format(
+                        like.get("fname"), like.get("tid")), secret)
+            except Exception as exc:  # noqa: BLE001 - 点赞绝不能影响签到
+                detail = redact.scrub("{}: {}".format(
+                    type(exc).__name__, exc), secret)
+                _update_in(state, like={"status": "error",
+                                        "category": _classify_exception(exc),
+                                        "code": None, "reason": None,
+                                        "detail": detail})
+
             _update_in(state, status="done", step="签到完成",
                        finished_at=_now_ms())
             _log("run={} done success={} failed={} warnings={} elapsed_ms={}".format(
@@ -508,6 +540,7 @@ def _snapshot_for_report(state):
                 "step": sub.get("step"),
                 "msign": sub.get("msign"),
                 "growth": sub.get("growth"),
+                "like": sub.get("like"),
                 "forum_total": sub.get("forum_total"),
                 "forum_checked": sub.get("forum_checked"),
                 "forum_success": sub.get("forum_success"),
@@ -526,6 +559,7 @@ def _snapshot_for_report(state):
             "account_mask": state.get("account_mask"),
             "msign": state.get("msign"),
             "growth": state.get("growth"),
+            "like": state.get("like"),
             "forum_total": state.get("forum_total"),
             "forum_checked": state.get("forum_checked"),
             "forum_success": state.get("forum_success"),
@@ -599,6 +633,21 @@ def _fmt_growth(growth):
     return "成长等级签到：失败（{}）".format(detail)
 
 
+def _fmt_like(like):
+    if not like:
+        return None
+    status = like.get("status")
+    if status == "success":
+        return "随机点赞：成功（{} / tid {}）".format(
+            like.get("fname") or "?", like.get("tid") or "?")
+    if status == "done":
+        return "随机点赞：今天已经完成"
+    if status == "disabled":
+        return None
+    return "随机点赞：失败（{}）".format(
+        like.get("detail") or tieba_codes.explain(like.get("code")))
+
+
 def _report_lines_for_account(label, acct):
     lines = []
     name = acct.get("account_name") or "贴吧账号"
@@ -608,6 +657,9 @@ def _report_lines_for_account(label, acct):
     growth = _fmt_growth(acct.get("growth"))
     if growth:
         lines.append("  " + growth)
+    like = _fmt_like(acct.get("like"))
+    if like:
+        lines.append("  " + like)
     msign = _fmt_msign(acct.get("msign"))
     if msign:
         lines.append("  " + msign)

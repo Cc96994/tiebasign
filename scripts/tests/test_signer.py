@@ -31,6 +31,7 @@ _PRIVATE = tempfile.mkdtemp(prefix="sign_selftest_")
 os.environ["ANDROID_PRIVATE"] = _PRIVATE
 
 import redact  # noqa: E402
+import liker  # noqa: E402
 import signer  # noqa: E402
 import tieba_codes  # noqa: E402
 
@@ -142,6 +143,20 @@ class FakeFollow:
         return len(self._forums)
 
 
+class FakeThread:
+    def __init__(self, tid, fname, title="测试帖", is_top=False,
+                 is_hide=False):
+        self.tid = tid
+        self.fname = fname
+        self.title = title
+        self.is_top = is_top
+        self.is_hide = is_hide
+
+
+class FakeThreads(list):
+    err = None
+
+
 class FakeClient:
     """可配置的 aiotieba.Client 替身。"""
 
@@ -153,6 +168,8 @@ class FakeClient:
         self.msign_err = None
         self.growth_err = None
         self.forum_behavior = {}
+        self.agree_err = None
+        self.agree_calls = 0
         self.active = 0
         self.max_active = 0
         self.calls = []
@@ -172,6 +189,19 @@ class FakeClient:
         self.growth_calls += 1
         self.calls.append(("sign_growth",))
         return FakeResp(self.growth_err)
+
+    async def get_threads(self, fname, pn=1, rn=30):
+        self.calls.append(("get_threads", fname, pn, rn))
+        return FakeThreads([
+            FakeThread(9001, fname, "置顶帖", is_top=True),
+            FakeThread(9002, fname, "普通帖 A"),
+            FakeThread(9003, fname, "普通帖 B"),
+        ])
+
+    async def agree(self, tid):
+        self.agree_calls += 1
+        self.calls.append(("agree", tid))
+        return FakeResp(self.agree_err)
 
     async def sign_forums(self):
         self.calls.append(("sign_forums",))
@@ -211,13 +241,16 @@ def make_state():
 
 
 def reset_files():
-    for name in (signer._LOG_FILENAME, signer._REPORT_FILENAME):
+    for name in (signer._LOG_FILENAME, signer._REPORT_FILENAME,
+                 liker._DATA_FILENAME):
         path = os.path.join(_PRIVATE, name)
         if os.path.exists(path):
             os.remove(path)
+    liker._cache = None
 
 
-async def run_sign(forums, behavior=None, msign_err=None, growth_err=None):
+async def run_sign(forums, behavior=None, msign_err=None, growth_err=None,
+                   agree_err=None):
     client = None
     real_client_cls = FakeClient
 
@@ -228,6 +261,7 @@ async def run_sign(forums, behavior=None, msign_err=None, growth_err=None):
             self.forum_behavior = behavior or {}
             self.msign_err = msign_err
             self.growth_err = growth_err
+            self.agree_err = agree_err
             nonlocal client
             client = self
 
@@ -266,6 +300,12 @@ def test_signer_flow():
     check("每个未签吧只请求一次",
           sum(1 for c in client.calls if c[0] == "sign_forum") == 5,
           client.calls)
+    check("每日随机点赞：成功", state["like"]["status"] == "success",
+          state["like"])
+    check("每日随机点赞：只点一次", client.agree_calls == 1,
+          client.calls)
+    check("点赞选的是非置顶帖",
+          not any(c[0] == "agree" and c[1] == 9001 for c in client.calls))
 
     by_forum = {f["forum"]: f for f in state["failures"]}
     check("340011 带 code", by_forum["risk-forum"]["code"] == 340011)
@@ -367,6 +407,31 @@ def test_growth_step():
     check("成长签到成功 -> success", state3["growth"]["status"] == "success")
 
 
+def test_like_daily_quota():
+    reset_files()
+    forums = [FakeForum("吧A")]
+    state1, client1 = asyncio.run(run_sign(forums))
+    check("点赞：第一次成功", state1["like"]["status"] == "success")
+    check("点赞：第一次真的调用 agree", client1.agree_calls == 1)
+
+    state2, client2 = asyncio.run(run_sign(forums))
+    check("点赞：同一天第二次跳过", state2["like"]["status"] == "done",
+          state2["like"])
+    check("点赞：第二次不再调用 agree", client2.agree_calls == 0,
+          client2.calls)
+
+    reset_files()
+    state3, _client3 = asyncio.run(run_sign(
+        forums, agree_err=FakeErr(340006, "")))
+    check("点赞失败：签到仍成功", state3["status"] == "done")
+    check("点赞失败：不计入 forum_failed", state3["forum_failed"] == 0)
+    check("点赞失败：状态为 error", state3["like"]["status"] == "error")
+    check("点赞失败：进 warnings",
+          any(w.get("forum") == "随机点赞" for w in state3["warnings"]))
+    check("点赞失败：有中文原因",
+          "目录异常" in (state3["like"].get("reason") or ""), state3["like"])
+
+
 def test_autosign_warning_not_failure():
     """msign 失败只进 warnings；所有吧签到成功时不能判失败/弹通知。"""
     import autosign
@@ -425,6 +490,7 @@ def main():
     print("== 账号入口 =="); test_account_gate_failure()
     print("== 网络分类 =="); test_network_error_category()
     print("== 成长等级签到 =="); test_growth_step()
+    print("== 每日随机点赞 =="); test_like_daily_quota()
     print("== 自动签到 warnings =="); test_autosign_warning_not_failure()
     print()
     print("{} checks, {} failed".format(TOTAL[0], len(FAILS)))

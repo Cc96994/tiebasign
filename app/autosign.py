@@ -32,6 +32,7 @@ _DEFAULTS = {
     "global_time": "08:00",
     "notify_system": True,
     "notify_dot": True,
+    "daily_like": True,   # 每个账号每天随机点赞 1 个帖子（v0.5.0）
     "accounts": {},   # {str(account_id): {"follow_global": bool, "custom_time": "HH:MM"}}
     "runs": {},       # {str(account_id): {"date": "YYYY-MM-DD", "ts": iso}}
     "results": {},    # {str(account_id): latest snapshot}
@@ -137,6 +138,7 @@ def get_settings():
         "global_time": _validate_time(data["global_time"]) or "08:00",
         "notify_system": bool(data["notify_system"]),
         "notify_dot": bool(data["notify_dot"]),
+        "daily_like": bool(data.get("daily_like", True)),
         "accounts": accounts,
     }
 
@@ -153,6 +155,8 @@ def save_settings(payload):
         data["notify_system"] = bool(payload["notify_system"])
     if "notify_dot" in payload:
         data["notify_dot"] = bool(payload["notify_dot"])
+    if "daily_like" in payload:
+        data["daily_like"] = bool(payload["daily_like"])
     accounts_payload = payload.get("accounts")
     if isinstance(accounts_payload, dict):
         for aid, cfg in accounts_payload.items():
