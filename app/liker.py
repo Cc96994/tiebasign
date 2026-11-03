@@ -10,7 +10,9 @@
 实现边界：
   * 只点主楼赞（``Client.agree(tid)``），不点楼中楼；
   * 跳过置顶帖/被屏蔽帖；某吧首页没有可点的帖子就跳过；
-  * 每个账号串行跑自己的关注吧，吧之间最多 2 个并发，避免一次爆量；
+  * 每个账号串行跑自己的关注吧，同一时刻只发 1 个点赞请求，并在每次
+    ``agree`` 前停 2~3.5 秒；遇到 3280004（操作太频繁）会退避重试，
+    避免“大多数吧都 3280004”；
   * 数据文件 ``<ANDROID_PRIVATE>/tiebasign_like.json``，不含 BDUSS；
   * 每日记录按账号 + 吧名，成功一次当天不再点这个吧。
 """
@@ -28,7 +30,10 @@ import tieba_codes
 
 _DATA_FILENAME = "tiebasign_like.json"
 _MAX_FORUM_PAGES = 25
-_LIKE_CONCURRENCY = 2
+_LIKE_CONCURRENCY = 1
+_LIKE_DELAY = (2.0, 3.5)
+_LIKE_RETRIES = 2
+_RL_CODE = 3280004
 _RN = 30
 
 _lock = threading.RLock()
@@ -299,6 +304,25 @@ async def _fetch_forums(client, sub):
     return forums
 
 
+async def _agree_with_retry(client, tid):
+    """点赞；3280004 表示操作太频繁，退避后重试，不把整轮都撞死。"""
+    last_err = None
+    for attempt in range(_LIKE_RETRIES + 1):
+        try:
+            resp = await client.agree(tid)
+        except Exception as exc:  # noqa: BLE001
+            return None, exc
+        err = getattr(resp, "err", None)
+        if err is None:
+            return resp, None
+        last_err = err
+        if tieba_codes.parse_code(getattr(err, "code", None)) != _RL_CODE \
+                or attempt >= _LIKE_RETRIES:
+            return resp, err
+        await asyncio.sleep(10 if attempt == 0 else 25)
+    return None, last_err
+
+
 async def _like_account_async(account, bduss):
     import aiotieba
 
@@ -367,18 +391,10 @@ async def _like_account_async(account, bduss):
                     thread = rng.choice(pool)
                     tid = int(thread.tid)
                     title = str(getattr(thread, "title", "") or "")
-                    try:
-                        resp = await client.agree(tid)
-                    except Exception as exc:  # noqa: BLE001
-                        code, reason, advice, detail, raw = _describe(exc)
-                        _add_failure(_sub_for(aid), fname, code, reason,
-                                     advice, detail)
-                        _record_forum(aid, fname, False, tid, title,
-                                      code, reason, advice, detail, raw)
-                        _bump(aid, "failed")
-                        _bump(aid, "checked")
-                        return
-                    err = getattr(resp, "err", None)
+                    # 点赞接口对频率很敏感：每次请求前停 2~3.5 秒，
+                    # 3280004 再退避重试（见 _agree_with_retry）。
+                    await asyncio.sleep(rng.uniform(*_LIKE_DELAY))
+                    resp, err = await _agree_with_retry(client, tid)
                     if err is not None:
                         code, reason, advice, detail, raw = _describe(err)
                         _add_failure(_sub_for(aid), fname, code, reason,
@@ -388,6 +404,12 @@ async def _like_account_async(account, bduss):
                         if tieba_codes.category_for_code(code) == \
                                 tieba_codes.CAT_ACCOUNT:
                             flags["stop"] = True
+                        if tieba_codes.parse_code(
+                                getattr(err, "code", None)) == _RL_CODE:
+                            flags["rate_limited"] = flags.get(
+                                "rate_limited", 0) + 1
+                            if flags["rate_limited"] >= 3:
+                                flags["stop"] = True
                         _bump(aid, "failed")
                         _bump(aid, "checked")
                         return

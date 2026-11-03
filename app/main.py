@@ -606,7 +606,7 @@ def _page_settings():
         "<span>吧群签到设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.5.0 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.5.2 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -2257,21 +2257,7 @@ function renderSingle(s){
   html+=warningsCard(s.warnings);
   if(s.failures && s.failures.length>0){
     html+='<div class="card"><div class="title">失败详情（'+s.failures.length+'）</div>';
-    var max=Math.min(s.failures.length,100);
-    for(var i=0;i<max;i++){
-      var f=s.failures[i];
-      var c=CAT_COLOR[f.category]||'#E5484D';
-      html+='<div style="border-bottom:1px solid rgba(0,0,0,.06);padding:10px 0">'+
-        '<div style="font-weight:700">'+escTxt(f.forum)+
-        ' <span style="color:'+c+';font-size:12px">'+escTxt(f.category)+'</span></div>'+
-        '<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>'+
-        (adviceLine(f)?'<div class="hint">'+escTxt(adviceLine(f))+'</div>':'')+
-        (codeLine(f)?'<div class="hint" style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(f))+'</div>':'')+
-        '</div>';
-    }
-    if(s.failures.length>max){
-      html+='<div class="hint">还有 '+(s.failures.length-max)+' 条未显示</div>';
-    }
+    html+=failureRows(s.failures,false);
     html+='</div>';
   }
   return html;
@@ -2364,21 +2350,7 @@ function renderMulti(s){
   html+=warningsCard(allWarnings);
   if(allFails.length>0){
     html+='<div class="card"><div class="title">失败详情（'+allFails.length+'）</div>';
-    var max=Math.min(allFails.length,100);
-    for(var j=0;j<max;j++){
-      var f=allFails[j];
-      var c=CAT_COLOR[f.category]||'#E5484D';
-      html+='<div style="border-bottom:1px solid rgba(0,0,0,.06);padding:10px 0">'+
-        '<div style="font-weight:700">'+escTxt(f.account+' → '+f.forum)+
-        ' <span style="color:'+c+';font-size:12px">'+escTxt(f.category)+'</span></div>'+
-        '<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>'+
-        (adviceLine(f)?'<div class="hint">'+escTxt(adviceLine(f))+'</div>':'')+
-        (codeLine(f)?'<div class="hint" style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(f))+'</div>':'')+
-        '</div>';
-    }
-    if(allFails.length>max){
-      html+='<div class="hint">还有 '+(allFails.length-max)+' 条未显示</div>';
-    }
+    html+=failureRows(allFails,true);
     html+='</div>';
   }
   return html;
@@ -2527,11 +2499,42 @@ function moduleStatus(a){
   if(a.status==='running') return ['进行中…','#2B5CE6'];
   return ['等待中','#8A90A0'];
 }
+function showMore(link){
+  var box=link.parentNode.nextElementSibling;
+  if(box){box.style.display='block';}
+  link.parentNode.style.display='none';
+}
+function failureRows(list,withAccount){
+  var total=Math.min(list.length,100);
+  var shown=Math.min(total,3);
+  function row(f){
+    var c=CAT_COLOR[f.category]||'#E5484D';
+    var title=withAccount?(f.account+' → '+f.forum):f.forum;
+    return '<div style="border-bottom:1px solid rgba(0,0,0,.06);padding:10px 0">'+
+      '<div style="font-weight:700">'+escTxt(title)+
+      ' <span style="color:'+c+';font-size:12px">'+escTxt(f.category)+'</span></div>'+
+      '<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>'+
+      (adviceLine(f)?'<div class="hint">'+escTxt(adviceLine(f))+'</div>':'')+
+      (codeLine(f)?'<div class="hint" style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(f))+'</div>':'')+
+      '</div>';
+  }
+  var h='';
+  for(var i=0;i<shown;i++){h+=row(list[i]);}
+  if(total>shown){
+    h+='<div class="hint" style="margin-top:6px"><a href="javascript:void(0)" '+
+      'onclick="showMore(this)">展开全部（'+list.length+'）</a></div><div style="display:none">';
+    for(var j=shown;j<total;j++){h+=row(list[j]);}
+    h+='</div>';
+  }
+  if(list.length>100){h+='<div class="hint">还有 '+(list.length-100)+' 条未显示</div>';}
+  return h;
+}
 function moduleFailures(list,prefix){
   var h='';
   if(!list||!list.length){return h;}
-  var max=Math.min(list.length,20);
-  for(var i=0;i<max;i++){
+  var total=Math.min(list.length,100);
+  var shown=Math.min(total,3);
+  for(var i=0;i<shown;i++){
     var f=list[i];
     h+='<div class="hint" style="border-top:1px solid rgba(127,127,127,.12);padding-top:6px;margin-top:6px">'+
       '<b>'+escTxt((prefix||'')+(f.forum||f.account||''))+'</b><br>'+
@@ -2540,7 +2543,21 @@ function moduleFailures(list,prefix){
       (codeLine(f)?'<br><span style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(f))+'</span>':'')+
       '</div>';
   }
-  if(list.length>max){h+='<div class="hint">还有 '+(list.length-max)+' 条未显示</div>';}
+  if(total>shown){
+    h+='<div class="hint" style="margin-top:6px"><a href="javascript:void(0)" '+
+      'onclick="showMore(this)">展开全部（'+list.length+'）</a></div><div style="display:none">';
+    for(var j=shown;j<total;j++){
+      var g=list[j];
+      h+='<div class="hint" style="border-top:1px solid rgba(127,127,127,.12);padding-top:6px;margin-top:6px">'+
+        '<b>'+escTxt((prefix||'')+(g.forum||g.account||''))+'</b><br>'+
+        escTxt(failLine(g))+
+        (adviceLine(g)?'<br>'+escTxt(adviceLine(g)):'')+
+        (codeLine(g)?'<br><span style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(g))+'</span>':'')+
+        '</div>';
+    }
+    h+='</div>';
+  }
+  if(list.length>100){h+='<div class="hint">还有 '+(list.length-100)+' 条未显示</div>';}
   return h;
 }
 function renderLikeState(s){

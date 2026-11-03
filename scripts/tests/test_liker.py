@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""随机点赞离线自检（v0.5.0，独立模块版）。
+"""随机点赞离线自检（v0.5.2，独立模块版）。
 
 运行：python3 scripts/tests/test_liker.py
 
@@ -27,6 +27,9 @@ _PRIVATE = tempfile.mkdtemp(prefix="like_selftest_")
 os.environ["ANDROID_PRIVATE"] = _PRIVATE
 
 import liker  # noqa: E402
+
+# 测试里不需要真的等 2~3.5 秒；生产值仍保留在模块里。
+liker._LIKE_DELAY = (0, 0)
 import tieba_api  # noqa: E402
 
 TOTAL = [0]

@@ -58,6 +58,38 @@ _lock = threading.RLock()
 _cache = None
 
 
+def _patch_blcp_ssl():
+    """让 aiotieba 的 BLCP 连接也用 certifi 证书。
+
+    Android 上 ``ssl.create_default_context()`` 可能找不到系统 CA，BLCP 连接
+    失败时 send_chatroom_msg 只会抛一个没有错误码的异常（用户看到的「百度没给
+    错误码」）。aiotieba 的 HTTP 层已经被 p4a 补丁修过，但 BLCP 是裸 TCP+SSL，
+    这里在进程内把它的 ssl 引用换成同一个上下文。
+    """
+    try:
+        import types
+        import aiotieba.core.blcp as blcp
+        if getattr(blcp, "_teiba_ssl_patched", False):
+            return
+        blcp.ssl = types.SimpleNamespace(
+            create_default_context=lambda *a, **k: _SSL_CONTEXT)
+        blcp._teiba_ssl_patched = True
+    except Exception:  # noqa: BLE001 - 补丁失败不阻塞其他群
+        pass
+
+
+def _log(msg):
+    try:
+        path = os.path.join(os.environ.get("ANDROID_PRIVATE") or os.getcwd(),
+                            "groupsign.log")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("[{}] {}\n".format(
+                time.strftime("%m-%d %H:%M:%S"), redact.scrub(str(msg))))
+            fh.flush()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _data_path():
     base = os.environ.get("ANDROID_PRIVATE") or os.getcwd()
     return os.path.join(base, _DATA_FILENAME)
@@ -139,18 +171,6 @@ def _save(data):
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
-
-
-def _log(msg):
-    try:
-        base = os.environ.get("ANDROID_PRIVATE") or os.getcwd()
-        with open(os.path.join(base, "groupsign.log"), "a",
-                  encoding="utf-8") as fh:
-            fh.write("[{}] {}\n".format(
-                time.strftime("%m-%d %H:%M:%S"), redact.scrub(str(msg))))
-            fh.flush()
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def _account(data, account_id):
@@ -322,7 +342,9 @@ def _describe(err):
             return None, None, "检查网络后重试", \
                 "网络连接出了问题，这条群消息没有发出去", raw
     if code is None:
-        detail = "百度没有给出错误码，这条群消息没有发出去"
+        text = str(err or "").strip()
+        detail = "群消息没有发出去（{}：{}）".format(
+            type(err).__name__, redact.scrub(text)[:120] or "没有返回原因")
     elif reason:
         detail = reason
     else:
@@ -354,6 +376,7 @@ async def run_account_async(client, account, secret=None):
     if not data["enabled"]:
         return {"status": "disabled", "sent": 0, "skipped": 0,
                 "failed": 0, "total": 0, "details": [], "warnings": []}
+    _patch_blcp_ssl()
     aid = str(account["id"])
     acct = data["accounts"].get(aid) or {}
     groups = list(acct.get("groups") or [])
@@ -406,6 +429,8 @@ async def run_account_async(client, account, secret=None):
             jerr = exc
         if jerr is not None:
             code, reason, advice, detail, raw = _describe(jerr)
+            _log("join failed cid={} code={} detail={} raw={}".format(
+                cid, code, detail, raw))
             if tieba_codes.category_for_code(code) == tieba_codes.CAT_ACCOUNT:
                 failed += 1
                 detail = "账号登录状态有问题，剩下的群今天不再发送"
@@ -427,6 +452,8 @@ async def run_account_async(client, account, secret=None):
             code, reason, advice, detail, raw = _describe(exc)
             failed += 1
             _record_run(aid, cid, False, detail, attempts)
+            _log("send exception cid={} code={} detail={} raw={}".format(
+                cid, code, detail, raw))
             warnings.append({
                 "forum": "群签到：{}".format(name),
                 "category": tieba_codes.CAT_NETWORK,
@@ -449,6 +476,8 @@ async def run_account_async(client, account, secret=None):
         category = tieba_codes.category_for_code(code) or tieba_codes.CAT_UNKNOWN
         failed += 1
         _record_run(aid, cid, False, detail, attempts)
+        _log("send failed cid={} code={} detail={} raw={}".format(
+            cid, code, detail, raw))
         warnings.append({
             "forum": "群签到：{}".format(name),
             "category": category, "code": code, "reason": reason,

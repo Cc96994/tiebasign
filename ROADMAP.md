@@ -1,8 +1,8 @@
-# ROADMAP —— v0.5.0（待发布）与下一版计划
+# ROADMAP —— v0.5.2（待发布）与下一版计划
 
 最后更新：2026-11-03
 
-## v0.5.0 状态（2026-11-03）
+## v0.5.2 状态（2026-11-04）
 
 工单 #4 的原始四项 + 用户追加的「每日随机点赞 1 个」。当前实现状态：
 
@@ -10,12 +10,12 @@
 |---|---|---|
 | 签到速度优化 | **已完成** | `signer.SIGN_CONCURRENCY = 4` + 30~150ms 抖动；逐吧补签从串行改为有上限并发，单次不重试的语义不变 |
 | 更精细的错误报告 | **已完成** | `app/tieba_codes.py` 用普通人能看懂的话写「原因 + 怎么办」（错误码放次要位置）+ `signer` 结构化字段 + `sign.log` + `/sign/report` 导出页；msign 失败改记 `warnings`，不再误报整体失败 |
-| BDUSS 保密与泄露检查 | **已完成** | `app/redact.py` 统一脱敏；`scripts/check_history_secrets.sh` 扫全部 git 历史；审计结论见 `docs/SECURITY_AUDIT_0.5.0.md`；文档里的真实账号掩码/昵称/md5 已替换为虚构值 |
+| BDUSS 保密与泄露检查 | **已完成** | `app/redact.py` 统一脱敏；`scripts/check_history_secrets.sh` 扫全部 git 历史；审计结论见 `docs/SECURITY_AUDIT_0.5.2.md`；文档里的真实账号掩码/昵称/md5 已替换为虚构值 |
 | 吧群自动签到 | **已完成（消息式，独立模块）** | 用户确认原理是“在指定群发一句话”，如「@群助手/领取今日福利」；`app/groupsign.py` 支持群分享链接添加、每账号自己的群、群专属/默认文案、每群每天发送成功后不再发、失败最多重试 3 次；签到页有独立「吧群签到」按钮，设置页独立 |
 | 每日随机点赞 | **已完成（独立模块）** | `app/liker.py`：每个关注的吧随机抽 1 个帖子点主楼赞，每吧每天最多一次；签到页有独立「随机点赞」按钮；失败只记详情，不影响签到 |
 
 其余不变：版本号已同步到 `buildozer_webview_app.spec`、`app/main.py` 与
-`app/updater.py`（0.5.0 / 1023500）；`scripts/app_identity.sh` 的「上一版事实」
+`app/updater.py`（0.5.2 / 1023520）；`scripts/app_identity.sh` 的「上一版事实」
 已更新为已发布的 0.4.0（versionCode 1023400、APK sha256 `3c300ce4…47cdfe`）。
 
 ## 已定下的路线（不要再动摇）
