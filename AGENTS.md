@@ -18,14 +18,14 @@ Python 3.12.7 + aiotieba 4.7.1
 Android 原生：Keystore / CookieManager / 前台服务 / 通知 / 安装入口
 ```
 
-- 线上正式版 **0.3.0**；**0.4.0 已在本地构建并核验，等上传**。
+- 线上正式版 **0.4.0**；**0.5.3 源码已完成，待构建与发布**（吧群消息签到已实现，机器人识别待真机确认）。
 - 首期只做 Android + arm64-v8a，minSdk 23 / targetSdk 34。iOS、armeabi-v7a、跨设备迁移是 PRD 明确不需要的。
 
 ## 2. 目录地图
 
 | 目录 | 是什么 | 能不能动 |
 |---|---|---|
-| `app/` | 正式版 Python 源码（main / signer / autosign / waterpost / updater / weblogin / keystore_crypto / storage / tieba_api / diag） | 主要工作面 |
+| `app/` | 正式版 Python 源码（main / signer / autosign / waterpost / groupsign / updater / weblogin / keystore_crypto / storage / tieba_api / tieba_codes / redact / liker / diag） | 主要工作面 |
 | `java_src/org/dsh/tiebaweb/` | 自家的 Java：KeystoreHelper / TiebaSignKeepAliveService / ApkProvider | **是构建输入**，见 §4.11 |
 | `p4a_local/` | 定制配方：aiotieba（NDK 编 crypto + certifi 补丁）、protobuf（纯 Python）、zlib | 谨慎 |
 | `scripts/` | 构建 / 核验 / 扫描脚本，全部自定位 | 谨慎 |

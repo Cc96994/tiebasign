@@ -47,10 +47,13 @@ put_tree() {  # <dir relative to PROJ>
 
 echo "== collecting the upload set"
 # 顶层文档与构建配置
-for f in .gitignore LICENSE buildozer_webview_app.spec README.md ROADMAP.md CREDITS.md \
+for f in AGENTS.md .gitignore LICENSE buildozer_webview_app.spec README.md ROADMAP.md CREDITS.md \
          GITHUB_PREP.md SIGNING.md PRD_ACCEPTANCE_0.3.0.md; do
     put "$PROJ/$f"
 done
+# docs/ 是决策记录、历史与审计报告的家（v0.5.0 起也放界面证据图）。
+# 它曾经不在清单里：docs/{DECISIONS,HISTORY}.md 只存在于 git，上传集会静默缺文档。
+put_tree "docs"
 # 应用源码 + 图标（app/ 下的 *.py 全要；数据库/日志由下面的闸门挡掉）
 while IFS= read -r -d '' f; do put "$f"; done < <(
     find "$PROJ/app" -maxdepth 1 -type f \( -name '*.py' -o -name 'icon.png' \) -print0)
@@ -72,6 +75,7 @@ for must in java_src/org/dsh/tiebaweb/ApkProvider.java \
             java_src/PythonActivity.updater.inc \
             third_party/p4a-dev.tar.gz \
             third_party/p4a-webview-base-overlay.tar.gz \
+            AGENTS.md docs/DECISIONS.md docs/HISTORY.md \
             .gitignore LICENSE; do
     [ -f "$NEW/$must" ] || fail "$must is not in the upload set"
 done

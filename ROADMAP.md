@@ -1,6 +1,22 @@
-# ROADMAP —— 下一版（v0.4.0）要做什么
+# ROADMAP —— v0.5.3（待发布）与下一版计划
 
-最后更新：2026-10-15
+最后更新：2026-11-03
+
+## v0.5.3 状态（2026-11-04）
+
+工单 #4 的原始四项 + 用户追加的「每日随机点赞 1 个」。当前实现状态：
+
+| 项 | 状态 | 落点 |
+|---|---|---|
+| 签到速度优化 | **已完成** | `signer.SIGN_CONCURRENCY = 4` + 30~150ms 抖动；逐吧补签从串行改为有上限并发，单次不重试的语义不变 |
+| 更精细的错误报告 | **已完成** | `app/tieba_codes.py` 用普通人能看懂的话写「原因 + 怎么办」（错误码放次要位置）+ `signer` 结构化字段 + `sign.log` + `/sign/report` 导出页；msign 失败改记 `warnings`，不再误报整体失败 |
+| BDUSS 保密与泄露检查 | **已完成** | `app/redact.py` 统一脱敏；`scripts/check_history_secrets.sh` 扫全部 git 历史；审计结论见 `docs/SECURITY_AUDIT_0.5.3.md`；文档里的真实账号掩码/昵称/md5 已替换为虚构值 |
+| 吧群自动签到 | **已完成（消息式，独立模块）** | 用户确认原理是“在指定群发一句话”，如「@群助手/领取今日福利」；`app/groupsign.py` 支持群分享链接添加、每账号自己的群、群专属/默认文案、每群每天发送成功后不再发、失败最多重试 3 次；签到页有独立「吧群签到」按钮，设置页独立 |
+| 每日随机点赞 | **已完成（独立模块）** | `app/liker.py`：每个关注的吧随机抽 1 个帖子点主楼赞，每吧每天最多一次；签到页有独立「随机点赞」按钮；失败只记详情，不影响签到 |
+
+其余不变：版本号已同步到 `buildozer_webview_app.spec`、`app/main.py` 与
+`app/updater.py`（0.5.3 / 1023503）；`scripts/app_identity.sh` 的「上一版事实」
+已更新为已发布的 0.4.0（versionCode 1023400、APK sha256 `3c300ce4…47cdfe`）。
 
 ## 已定下的路线（不要再动摇）
 
@@ -240,7 +256,7 @@ WSL 内存充裕（可用 5.9 GB）、`/tmp` 权限正常、无残留 aapt2 进�
 
 **已实测（2026-10-15，0.4.0 覆盖 0.3.0）**：`adb install -r` → `Success`，
 `firstInstallTime` 保持 2026-08-25 不变、`tiebasign_accounts.json` 的 md5 前后一致
-（`7f0f1023…`）、`/api/accounts` 仍返回原账号（"Qq"，掩码 `c4SD****JnUH`）
+（`00000000…`）、`/api/accounts` 仍返回原账号（"示例账号"，掩码 `abCD****wxyz`）
 → **登录态与 Keystore 密钥都没丢**。依据：`app/main.py` 关于页写明 BDUSS 用
 **Android Keystore AES-GCM** 加密，卸载会销毁 Keystore 密钥 → 覆盖安装是保住
 登录态的**唯一**路径（备份 JSON 也没用，密钥不在文件里）。
@@ -314,7 +330,7 @@ WebViewClient 的 `shouldOverrideUrlLoading` / `onPageFinished` 里（同一批�
 ### 凭据：`_legacy/tieba_sign_app_proto/BDUSS.txt` 已移出
 
 2026-10-16 移到 `G:\学习\aiotieba\_quarantine\`（连同处置说明）。**它不是过期文件**：
-192 字符裸 base64，掩码 `c4SD****JnUH` 与 App 当前账号（`/api/accounts` 返回的掩码）
+192 字符裸 base64，掩码 `abCD****wxyz` 与 App 当前账号（`/api/accounts` 返回的掩码）
 **完全一致** → 那是一份**还活着的登录凭据的明文副本**，来自重构前的原型目录。
 现在的 App 把凭据用 Android Keystore AES-GCM 加密存在 `app/tieba_sign_accounts.json`
 （已进 `.gitignore`），不再落地明文。**仅删文件不会让已经流出去的凭据失效**；

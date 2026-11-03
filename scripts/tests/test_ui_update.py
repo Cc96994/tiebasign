@@ -83,18 +83,18 @@ def render_all():
 
     states = (
         ("空闲", {}),
-        ("发现新版本", {"phase": "available", "dot": True, "detail": "发现 v0.5.0",
-                   "latest": {"version": "0.5.0", "version_code": 1023500,
-                              "tag": "v0.5.0", "source": "github",
+        ("发现新版本", {"phase": "available", "dot": True, "detail": "发现 v0.5.4",
+                   "latest": {"version": "0.5.4", "version_code": 1023504,
+                              "tag": "v0.5.4", "source": "github",
                               "source_label": "GitHub", "apk_name": "a.apk",
                               "sha256": "ab" * 32, "size": 20670000,
                               "notes": "说明", "found_at": "2026-10-16 00:00:00"}}),
         ("已下载", {"phase": "ready", "dot": True, "detail": "已下载并通过校验",
                  "downloaded": {"path": "/data/x.apk", "name": "a.apk",
                                 "sha256": "cd" * 32, "size": 20670000,
-                                "version": "0.5.0", "version_code": 1023500,
+                                "version": "0.5.4", "version_code": 1023504,
                                 "source": "gitee", "ts": "2026-10-16 00:00:00"},
-                 "latest": {"version": "0.5.0", "version_code": 1023500,
+                 "latest": {"version": "0.5.4", "version_code": 1023504,
                             "source_label": "Gitee"}}),
         ("出错且各源都有报告", {"phase": "error", "detail": "网络不可达",
                         "reports": [{"source": "github", "label": "GitHub",
@@ -106,7 +106,7 @@ def render_all():
                                      "status": "ok", "tag": "V0.2.0",
                                      "releases": 3}],
                         "history": [{"ts": "2026-10-16 00:00:00",
-                                     "summary": "查到 v0.5.0"}]}),
+                                     "summary": "查到 v0.5.4"}]}),
     )
     for label, kw in states:
         set_state(**kw)
@@ -132,14 +132,14 @@ def page_content_checks():
           "检查更新" in settings_html and "发现 v" not in settings_html)
 
     set_state(phase="available", dot=True,
-              latest={"version": "0.5.0", "version_code": 1023500})
+              latest={"version": "0.5.4", "version_code": 1023504})
     check("设置页发现新版本时显示版本号",
-          "检查更新 · 发现 v0.5.0" in main._page_settings())
+          "检查更新 · 发现 v0.5.4" in main._page_settings())
 
     set_state(phase="ready", dot=True,
-              downloaded={"version": "0.5.0", "path": "/x.apk"})
+              downloaded={"version": "0.5.4", "path": "/x.apk"})
     check("设置页已下载时显示待安装",
-          "v0.5.0 已下载，待安装" in main._page_settings())
+          "v0.5.4 已下载，待安装" in main._page_settings())
 
     # 红点：只在设置页那个 tab 上，且只在真的查到东西时
     set_state(dot=True)
@@ -151,9 +151,51 @@ def page_content_checks():
     check("_update_dot() 读不到状态时不抛异常",
           main._update_dot() in (True, False))
 
+    # v0.5.4：签到页要有报告入口，报告页要能渲染（失败详情导出）
+    sign_html = main._page_sign()
+    check("签到页有「查看签到报告」入口", "/sign/report" in sign_html)
+    report_html = main._page_sign_report()
+    check("签到报告页能渲染",
+          "签到报告" in report_html and "copy_report" in report_html,
+          report_html[:200])
+    check("签到报告页说明已脱敏", "BDUSS" in report_html and "掩码" in report_html)
+    check("签到页 JS 展示成长等级签到", "成长等级签到" in main._JS_SIGN)
+    check("签到页 JS 展示错误码", "错误码" in main._JS_SIGN)
+    check("签到页 JS 用「原因」和「怎么办」说人话",
+          "原因：" in main._JS_SIGN and "怎么办：" in main._JS_SIGN)
+    check("签到页 JS 有提醒区（warnings）", "warningsCard" in main._JS_SIGN)
+    check("签到页 JS 展示随机点赞", "随机点赞" in main._JS_SIGN)
+    check("失败详情默认只显示前三个，可展开",
+          "showMore" in main._JS_SIGN and "展开全部" in main._JS_SIGN)
+    import storage
+    _old_list = storage.list_accounts
+    _old_cur = storage.get_current_account
+    _fake_acct = {"id": 1, "name": "示例账号", "mask": "abCD****wxyz",
+                  "is_current": True}
+    storage.list_accounts = lambda: [dict(_fake_acct)]
+    storage.get_current_account = lambda: dict(_fake_acct)
+    try:
+        sign_html2 = main._page_sign()
+    finally:
+        storage.list_accounts = _old_list
+        storage.get_current_account = _old_cur
+    check("签到页有独立的随机点赞模块",
+          "id='like_btn'" in sign_html2 and "开始随机点赞" in sign_html2)
+    check("签到页有独立的吧群签到模块",
+          "id='gs_btn'" in sign_html2 and "开始吧群签到" in sign_html2)
+    check("设置页有「吧群签到设置」入口",
+          "/settings/groupsign" in main._page_settings())
+    gs_html = main._page_settings_groupsign()
+    check("吧群签到页能渲染",
+          "吧群签到设置" in gs_html and "添加群" in gs_html, gs_html[:200])
+    check("吧群签到页有自定义文案输入",
+          "gs_text" in gs_html and "默认发送内容" in gs_html)
+    check("吧群签到页有手动填吧ID的兜底",
+          "gs_fid" in gs_html and "gs_name" in gs_html)
+
     # 更新页：按钮与文案
     set_state(phase="available",
-              latest={"version": "0.5.0", "version_code": 1023500})
+              latest={"version": "0.5.4", "version_code": 1023504})
     page = main._page_settings_update()
     check("更新页有「立即检查」按钮", "id='up_check'" in page and "立即检查" in page)
     check("更新页有「下载更新」按钮", "id='up_download'" in page)
@@ -163,11 +205,11 @@ def page_content_checks():
     check("更新页把两个源的说明写出来",
           "GitHub" in page and "Gitee" in page)
     check("更新页显示当前版本",
-          "当前版本" in page and "0.4.0" in page, page[:200])
+          "当前版本" in page and updater._APP_VERSION in page, page[:200])
 
     set_state(phase="ready",
               downloaded={"path": "/data/app/update/a.apk", "size": 20670000,
-                          "sha256": "cd" * 32, "version": "0.5.0"})
+                          "sha256": "cd" * 32, "version": "0.5.4"})
     page = main._page_settings_update()
     check("已下载时更新页给出「立即安装」按钮", "id='up_install'" in page)
     check("已下载时更新页显示体积（19.7 MB）",
@@ -216,9 +258,14 @@ def http_checks():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = "http://127.0.0.1:{}".format(port)
+    # 显式绕过 http_proxy：某些环境（WSL/公司代理）会把 127.0.0.1 也交给
+    # 代理，结果代理返回 502，看起来像 App 服务坏了。这是测试环境问题，
+    # 不是产品行为，所以只在这个自检里禁用代理。
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}))
 
     def get(path):
-        with urllib.request.urlopen(base + path, timeout=10) as resp:
+        with opener.open(base + path, timeout=10) as resp:
             return resp.status, resp.read().decode("utf-8")
 
     def post(path, obj):
@@ -226,7 +273,7 @@ def http_checks():
             base + path, data=json.dumps(obj or {}).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with opener.open(req, timeout=10) as resp:
                 return resp.status, json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))
@@ -238,6 +285,16 @@ def http_checks():
         status, body = get("/settings/update")
         check("GET /settings/update 200 且是完整页面",
               status == 200 and "up_check" in body and "</html>" in body)
+        status, body = get("/sign/report")
+        check("GET /sign/report 200 且是完整页面",
+              status == 200 and "复制报告" in body and "</html>" in body)
+        status, body = get("/settings/groupsign")
+        check("GET /settings/groupsign 200 且是完整页面",
+              status == 200 and "吧群签到" in body and "</html>" in body)
+        status, body = post("/api/groupsign/settings", {"enabled": False})
+        check("吧群签到开关可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["enabled"] is False, body)
         status, body = get("/api/update/state")
         state = json.loads(body)["state"]
         check("GET /api/update/state 200",
@@ -250,6 +307,14 @@ def http_checks():
         status, body = post("/api/update/settings", {"auto_check": False})
         check("POST 设置成功", status == 200 and body["ok"] is True)
         check("设置真的生效了", updater.get_settings()["auto_check"] is False)
+        status, raw = get("/api/like/state")
+        body = json.loads(raw)
+        check("GET /api/like/state 200",
+              status == 200 and body["ok"] is True)
+        status, raw = get("/api/groupsign/state")
+        body = json.loads(raw)
+        check("GET /api/groupsign/state 200",
+              status == 200 and body["ok"] is True)
         status, body = post("/api/update/settings", {"download_mode": "bogus"})
         check("非法下载来源被拒（400）",
               status == 400 and body["ok"] is False, (status, body))
@@ -284,14 +349,14 @@ def http_checks():
 # --------------------------------------------------------------- 新加的小件
 def unit_checks():
     check("_progress_text 有百分比与 MB",
-          updater._progress_text("0.5.0", 5 * 1024 * 1024, 20 * 1024 * 1024)
-          == "正在下载 v0.5.0… 25%（5 / 20 MB）",
-          updater._progress_text("0.5.0", 5 * 1024 * 1024, 20 * 1024 * 1024))
+          updater._progress_text("0.5.4", 5 * 1024 * 1024, 20 * 1024 * 1024)
+          == "正在下载 v0.5.4… 25%（5 / 20 MB）",
+          updater._progress_text("0.5.4", 5 * 1024 * 1024, 20 * 1024 * 1024))
     check("_progress_text 没 Content-Length 时只说已下多少",
-          updater._progress_text("0.5.0", 3 * 1024 * 1024, 0)
-          == "正在下载 v0.5.0… 已下 3 MB")
+          updater._progress_text("0.5.4", 3 * 1024 * 1024, 0)
+          == "正在下载 v0.5.4… 已下 3 MB")
     check("_progress_text 进度不会超过 100%",
-          "100%" in updater._progress_text("0.5.0", 30 * 1024 * 1024,
+          "100%" in updater._progress_text("0.5.4", 30 * 1024 * 1024,
                                           20 * 1024 * 1024))
     set_state(dot=True)
     check("dot_pending 读到 True", updater.dot_pending() is True)
