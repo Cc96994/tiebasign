@@ -1,4 +1,4 @@
-# ROADMAP —— v0.5.0（进行中）与下一版计划
+# ROADMAP —— v0.5.0（待发布）与下一版计划
 
 最后更新：2026-11-03
 
@@ -11,7 +11,7 @@
 | 签到速度优化 | **已完成** | `signer.SIGN_CONCURRENCY = 4` + 30~150ms 抖动；逐吧补签从串行改为有上限并发，单次不重试的语义不变 |
 | 更精细的错误报告 | **已完成** | `app/tieba_codes.py` 错误码表 + `signer` 结构化 `code/reason/detail` + `sign.log` + `/sign/report` 导出页；msign 失败改记 `warnings`，不再误报整体失败 |
 | BDUSS 保密与泄露检查 | **已完成** | `app/redact.py` 统一脱敏；`scripts/check_history_secrets.sh` 扫全部 git 历史；审计结论见 `docs/SECURITY_AUDIT_0.5.0.md`；文档里的真实账号掩码/昵称/md5 已替换为虚构值 |
-| 吧群自动签到 | **部分** | 用户确认 A（成长等级签到）+ B（群聊签到）都要。A 已接 `sign_growth`；B 在 APK 里只找到 `ChatroomSignInfo { chatroom_id, jump_scheme, guide_text }`，它是服务端下发的 H5 引导（`jump_scheme`），没有可直接调用的 REST 接口；需要一次真机抓包/`jump_scheme` 样本才能补 |
+| 吧群自动签到 | **A 已完成；B 已搁置** | A（成长等级签到）已接 `sign_growth`；B（群聊签到）在 APK 里只找到 `ChatroomSignInfo { chatroom_id, jump_scheme, guide_text }`，它是服务端下发的 H5 引导，没有可直接调用的 REST 接口。**用户 2026-11-03 要求 B 先搁置**，等有抓包/样本时再开，不阻塞 v0.5.0 |
 | 每日随机点赞 1 个 | **已完成** | `app/liker.py`：每个账号每天最多 1 次，从关注吧最新主题帖里随机选非置顶帖点主楼赞；失败只记 warning，不影响签到；开关在「自动签到设置」页 |
 
 其余不变：版本号已同步到 `buildozer_webview_app.spec`、`app/main.py` 与

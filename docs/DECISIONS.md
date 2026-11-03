@@ -246,11 +246,12 @@
 - **楼中楼**：等新版 aiotieba 恢复接口，或找到实测可用的 Web 端点。当前只留空位。
 - **Gitee 发行版**：仓库存在但没有 Release，备用更新源实际未生效。
 - **`THIRD-PARTY-NOTICES.md`**：仍待补（0.5.0 未完成；不影响功能，但影响分发合规）。
-- **吧群签到（B）**：用户确认 A+B 都要。A（成长等级 `sign_growth`）已接入。
-  B（贴吧群聊里的群签到）在 Tieba APK 里只找到 `ChatroomSignInfo { chatroom_id,
-  jump_scheme, guide_text }`——它是**服务端下发的 H5 引导**，`jump_scheme` 才指向
-  真正的签到页；没有可直接调用的 REST 接口，aiotieba 4.7.1/4.8.4 也没有。
-  需要一次真机抓包（把 `jump_scheme` 或群签到请求 URL/响应发来）才能补，无法离线猜。
+- **吧群签到（B）——已搁置**：A（成长等级 `sign_growth`）已接入。B（贴吧群聊里的
+  群签到）在 Tieba APK 里只找到 `ChatroomSignInfo { chatroom_id, jump_scheme,
+  guide_text }`——它是**服务端下发的 H5 引导**，`jump_scheme` 才指向真正的签到页；
+  没有可直接调用的 REST 接口，aiotieba 4.7.1/4.8.4 也没有。用户 2026-11-03 明确
+  要求**先搁置** B、先做其他功能；等以后拿到真机抓包（`jump_scheme` 或群签到请求
+  URL/响应）再开，不阻塞 v0.5.0。
 - **本地目录接 git**：`G:\学习\aiotieba\tieba_sign_android` 至今不是 git 仓库，与 GitHub 上那份
   没有关联，源码更新靠"重新整理上传"。这是历史上 `github_src/` 反复过期、`SIGNING.md`
   一度只剩在暂存目录里的根因。
