@@ -5,7 +5,8 @@
 
 覆盖的是 v0.5.0 新增/改动的三块，全部离线、不联网、不碰 Android：
 
-  1. 错误码表：已知码必须给出分类和中文原因，未收录码必须明确写「未收录」
+  1. 错误码表：已知码必须给出分类、普通人能看懂的原因和「怎么办」；未知码必须
+     明确说「百度没有给出具体原因」，而不是编一个。
      而不是编一个原因。
   2. 并发签到：sign_forum 的并发数不得超过 SIGN_CONCURRENCY，且确实并发
      （不能退化成串行）；单个吧失败不拖垮整轮。
@@ -56,14 +57,14 @@ assert len(FAKE_BDUSS) > 120
 def test_codes():
     check("111 分类=吧不存在",
           tieba_codes.category_for_code(111) == tieba_codes.CAT_NO_FORUM)
-    check("111 原因写明该吧不存在",
-          "该吧不存在" in (tieba_codes.reason(111) or ""))
+    check("111 原因写明这个吧不存在",
+          "吧不存在" in (tieba_codes.reason(111) or ""))
     check("111 展示文本带「错误码 111」",
           "错误码 111" in tieba_codes.explain(111))
     check("160002 分类=已签到",
           tieba_codes.category_for_code(160002) == tieba_codes.CAT_DONE)
-    check("340011 原因=签得太快",
-          "签得太快" in (tieba_codes.reason(340011) or ""))
+    check("340011 原因=操作太快",
+          "太快" in (tieba_codes.reason(340011) or ""))
     check("340006 分类=风控限制",
           tieba_codes.category_for_code(340006) == tieba_codes.CAT_RISK)
     check("110000 分类=账号失效",
@@ -310,11 +311,16 @@ def test_signer_flow():
     by_forum = {f["forum"]: f for f in state["failures"]}
     check("340011 带 code", by_forum["risk-forum"]["code"] == 340011)
     check("340011 带中文原因",
-          "签得太快" in (by_forum["risk-forum"]["reason"] or ""))
+          "太快" in (by_forum["risk-forum"]["reason"] or ""))
     check("空 errmsg 不出现空 detail",
-          "百度未返回错误原因" in by_forum["risk-forum"]["detail"])
-    check("111 之外未知码明确写未收录",
-          "未收录" in by_forum["未知吧"]["detail"])
+          "操作太快" in by_forum["risk-forum"]["detail"])
+    check("未知码说明百度没有给出具体原因",
+          "百度没有给出具体原因" in by_forum["未知吧"]["detail"])
+    check("每个失败都带「怎么办」建议",
+          bool(by_forum["未知吧"].get("advice"))
+          and bool(by_forum["risk-forum"].get("advice")))
+    check("111 的建议是检查吧名/取消关注",
+          "吧名" in (tieba_codes.advice(111) or ""))
     check("未知码分类=未知错误",
           by_forum["未知吧"]["category"] == tieba_codes.CAT_UNKNOWN)
 
@@ -338,7 +344,7 @@ def test_signer_flow():
 
     text = signer.report_text()
     check("报告文本含错误码 340011", "错误码 340011" in text)
-    check("报告文本含中文原因", "签得太快" in text)
+    check("报告文本含中文原因", "操作太快" in text)
     check("报告文本含 BDUSS 掩码", state["account_mask"] in text)
     check("报告文本不含完整 BDUSS", FAKE_BDUSS not in text)
     check("报告文本说明不含完整 BDUSS", "不含完整 BDUSS" in text)
@@ -354,7 +360,7 @@ def test_msign_warning():
     check("msign 失败进 warnings", len(state["warnings"]) == 1)
     warn = state["warnings"][0]
     check("warning 带 code", warn["code"] == 340011)
-    check("warning 带 cause", "签得太快" in (warn["reason"] or ""))
+    check("warning 带 cause", "太快" in (warn["reason"] or ""))
     check("msign 状态为 error", state["msign"]["status"] == "error")
     check("msign 详情非空", bool(state["msign"]["detail"]))
 
@@ -376,8 +382,9 @@ def test_account_gate_failure():
     check("账号验证失败 -> status=error", state["status"] == "error")
     check("账号验证失败带 error 分类",
           state["error"]["category"] == tieba_codes.CAT_ACCOUNT)
-    check("账号验证失败带中文原因",
-          "登录已失效" in (state["error"]["detail"] or ""))
+    check("账号验证失败带普通人能看懂的原因",
+          "登录" in (state["error"]["detail"] or "")
+          and "重新登录" in (state["error"]["advice"] or ""))
 
 
 def test_network_error_category():
@@ -429,7 +436,7 @@ def test_like_daily_quota():
     check("点赞失败：进 warnings",
           any(w.get("forum") == "随机点赞" for w in state3["warnings"]))
     check("点赞失败：有中文原因",
-          "目录异常" in (state3["like"].get("reason") or ""), state3["like"])
+          "不能签到" in (state3["like"].get("reason") or ""), state3["like"])
 
 
 def test_autosign_warning_not_failure():

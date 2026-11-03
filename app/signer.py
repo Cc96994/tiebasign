@@ -7,8 +7,9 @@ Flow per PRD v1.0 (single attempt, NO retry):
     2. client.sign_forums()   -> Baidu web one-key sign (msign)
     3. get_self_follow_forums -> enumerate followed forums, page by page
     4. sign_forum(fname)      -> sign every forum still not signed
-Failure categories: 已签到 / 未关注 / 吧不存在 / 账号失效 / 需要验证码 /
-网络异常 / 风控限制 / 未知错误.
+Failure categories: 已签到 / 未关注 / 吧不存在 / 登录问题 / 需要验证码 /
+网络问题 / 被限制 / 原因不明。每条失败先给普通人能看懂的「原因」和「怎么办」，
+错误码只放次要位置。
 Manual runs never raise system notifications and never set the red dot.
 
 v0.5.0 changes:
@@ -168,7 +169,7 @@ def start(account, bduss):
             future.result(timeout=900)  # 15 min ceiling
         except asyncio.TimeoutError:
             _update(status="error", step="签到超时",
-                    error={"category": "网络异常", "code": None,
+                    error={"category": tieba_codes.CAT_NETWORK, "code": None,
                            "reason": None,
                            "detail": "签到超过 15 分钟仍未完成，已停止等待"})
         except Exception as exc:  # noqa: BLE001
@@ -216,27 +217,30 @@ def _classify_server_error(code, msg):
 
 
 def _err_detail(err):
-    """返回 (code, detail, reason)。detail 一定带错误码解释（若 code 存在）。"""
+    """返回 (code, detail, reason, advice, raw)。
+
+    detail 给普通用户看（人话）；raw 是百度原文，只进日志/报告的技术细节；
+    advice 是「怎么办」。
+    """
     code = tieba_codes.parse_code(getattr(err, "code", None))
     msg = getattr(err, "msg", None)
     if msg is None:
         msg = str(err)
-    msg = str(msg).strip()
-    msg = redact.scrub(msg)
+    raw = redact.scrub(str(msg).strip())
 
     reason = tieba_codes.reason(code)
     if code is None:
-        return None, (msg or "未知错误（异常没有错误码）"), None
+        detail = "百度没有给出错误码，这次操作没有成功"
+        advice = "稍后再试；如果一直失败，把这份签到报告发给开发者"
+        return None, detail, None, advice, raw
     if reason:
-        if msg:
-            detail = "{}（{}）".format(msg, tieba_codes.explain(code))
-        else:
-            detail = "百度未返回错误原因（{}）".format(tieba_codes.explain(code))
-    elif msg:
-        detail = "{}（错误码 {}，未收录）".format(msg, code)
+        detail = reason
+        advice = tieba_codes.advice(code) or (
+            "稍后再试；如果一直失败，把这份签到报告发给开发者")
     else:
-        detail = "百度未返回错误原因（错误码 {}，未收录）".format(code)
-    return code, detail, reason
+        detail = "百度没有给出具体原因，这次操作没有成功"
+        advice = "稍后再试；如果一直失败，把这份签到报告发给开发者"
+    return code, detail, reason, advice, raw
 
 
 def _classify_exception(exc):
@@ -253,7 +257,7 @@ def _classify_exception(exc):
 
 
 def _failure_item(fname, err, secret=None):
-    code, detail, reason = _err_detail(err)
+    code, detail, reason, advice, raw = _err_detail(err)
     category = _classify_server_error(code, str(getattr(err, "msg", None)
                                                or err))
     return {
@@ -261,16 +265,19 @@ def _failure_item(fname, err, secret=None):
         "category": category,
         "code": code,
         "reason": reason,
+        "advice": advice,
         "detail": redact.scrub(detail, secret),
+        "raw": redact.scrub(raw, secret),
     }
 
 
 def _record_forum_failure(state, fname, err, secret=None):
     item = _failure_item(fname, err, secret)
     _append_failure_in(state, item)
-    _log("run={} forum={} code={} category={} reason={} detail={}".format(
+    _log("run={} forum={} code={} category={} reason={} detail={} raw={}".format(
         state.get("run_id"), item["forum"], item["code"],
-        item["category"], item["reason"], item["detail"]), secret)
+        item["category"], item["reason"], item["detail"],
+        item["raw"]), secret)
 
 
 def _warn(state, kind, err, secret=None):
@@ -383,14 +390,17 @@ async def _sign_async(state, bduss):
             if uerr is not None:
                 item = _failure_item("账号验证", uerr, secret)
                 detail = item["detail"]
-                _log("account gate failed code={} category={} detail={}".format(
-                    item["code"], item["category"], detail), secret)
+                _log("account gate failed code={} category={} detail={} "
+                     "raw={}".format(item["code"], item["category"], detail,
+                                     item["raw"]), secret)
                 _update_in(state, status="error", step="账号验证失败",
                            finished_at=_now_ms(),
                            error={"category": item["category"],
                                   "code": item["code"],
                                   "reason": item["reason"],
-                                  "detail": detail})
+                                  "advice": item["advice"],
+                                  "detail": detail,
+                                  "raw": item["raw"]})
                 return
 
             # ---- 1.5 成长等级签到（旁路，失败不算失败） -----------------
@@ -406,21 +416,25 @@ async def _sign_async(state, bduss):
                                          "category": None,
                                          "code": None,
                                          "reason": None,
-                                         "detail": "网页一键签到成功"})
+                                         "advice": None,
+                                         "detail": "网页一键签到成功",
+                                         "raw": ""})
             else:
-                code, detail, reason = _err_detail(merr)
+                code, detail, reason, advice, raw = _err_detail(merr)
                 category = _classify_server_error(
                     code, str(getattr(merr, "msg", None) or merr))
                 _update_in(state, msign={"status": "error",
                                          "category": category,
                                          "code": code,
                                          "reason": reason,
+                                         "advice": advice,
                                          "detail": redact.scrub(detail,
-                                                                secret)})
+                                                                secret),
+                                         "raw": redact.scrub(raw, secret)})
                 # msign 失败不算整体失败：后面逐吧补签才是权威结果。
                 _warn(state, "网页一键签到(msign)", merr, secret)
-                _log("msign failed code={} category={} detail={}".format(
-                    code, category, detail), secret)
+                _log("msign failed code={} category={} detail={} raw={}".format(
+                    code, category, detail, raw), secret)
 
             # ---- 3. enumerate followed forums ----------------------------
             _update_in(state, step="获取关注吧列表")
@@ -432,16 +446,19 @@ async def _sign_async(state, bduss):
                 if rerr is not None:
                     item = _failure_item("获取关注吧列表", rerr, secret)
                     _log("follow list failed pn={} code={} category={} "
-                         "detail={}".format(pn, item["code"],
-                                            item["category"],
-                                            item["detail"]), secret)
+                         "detail={} raw={}".format(pn, item["code"],
+                                                   item["category"],
+                                                   item["detail"],
+                                                   item["raw"]), secret)
                     _update_in(state, status="error",
                                step="获取关注吧列表失败",
                                finished_at=_now_ms(),
                                error={"category": item["category"],
                                       "code": item["code"],
                                       "reason": item["reason"],
-                                      "detail": item["detail"]})
+                                      "advice": item["advice"],
+                                      "detail": item["detail"],
+                                      "raw": item["raw"]})
                     return
                 for forum in res:
                     forums.append(forum)
@@ -472,10 +489,12 @@ async def _sign_async(state, bduss):
                 if like.get("status") == "error":
                     state["warnings"].append({
                         "forum": "随机点赞",
-                        "category": like.get("category") or "未知错误",
+                        "category": like.get("category") or tieba_codes.CAT_UNKNOWN,
                         "code": like.get("code"),
                         "reason": like.get("reason"),
+                        "advice": like.get("advice"),
                         "detail": like.get("detail") or "",
+                        "raw": like.get("raw") or "",
                     })
                     _log("like failed detail={}".format(
                         like.get("detail")), secret)
@@ -499,17 +518,26 @@ async def _sign_async(state, bduss):
                 - (state.get("started_at") or _now_ms())), secret)
     except Exception as exc:  # noqa: BLE001
         category = _classify_exception(exc)
-        detail = redact.scrub("{}: {}".format(type(exc).__name__, exc), secret)
+        raw = redact.scrub("{}: {}".format(type(exc).__name__, exc), secret)
+        code = tieba_codes.parse_code(getattr(exc, "code", None))
+        reason = tieba_codes.reason(code)
+        if category == tieba_codes.CAT_NETWORK:
+            detail = "网络连接出了问题，这次签到没有完成"
+            advice = "检查网络后重试；如果一直失败，把这份签到报告发给开发者"
+        else:
+            detail = reason or "签到过程中出现了异常，这次没有完成"
+            advice = tieba_codes.advice(code) or (
+                "稍后再试；如果一直失败，把这份签到报告发给开发者")
         _update_in(state, status="error", step="签到异常",
                    finished_at=_now_ms(),
                    error={"category": category,
-                          "code": tieba_codes.parse_code(
-                              getattr(exc, "code", None)),
-                          "reason": tieba_codes.reason(
-                              getattr(exc, "code", None)),
-                          "detail": detail})
-        _log("run={} exception category={} detail={}".format(
-            state.get("run_id"), category, detail), secret)
+                          "code": code,
+                          "reason": reason,
+                          "advice": advice,
+                          "detail": detail,
+                          "raw": raw})
+        _log("run={} exception category={} detail={} raw={}".format(
+            state.get("run_id"), category, detail, raw), secret)
 
 
 # --------------------------------------------------------------------------
@@ -597,27 +625,25 @@ def _fmt_msign(msign):
         return None
     if msign.get("status") == "success":
         return "网页一键签到：成功"
-    code = msign.get("code")
-    detail = msign.get("detail") or ""
-    return "网页一键签到：失败（{}）".format(detail or
-                                             tieba_codes.explain(code))
+    return "网页一键签到：没成功，已改为逐个吧补签"
 
 
 def _fmt_failure(item):
-    reason = item.get("reason")
     code = item.get("code")
-    bits = [str(item.get("forum") or "?")]
+    detail = item.get("reason") or item.get("detail") or (
+        "百度没有给出具体原因")
+    bits = ["{}".format(item.get("forum") or "?")]
     if item.get("category"):
         bits.append(str(item["category"]))
+    bits.append("原因：{}".format(detail))
+    advice = item.get("advice")
+    if advice:
+        bits.append("怎么办：{}".format(advice))
     if code is not None:
         bits.append("错误码 {}".format(code))
-    if reason:
-        bits.append(str(reason))
-    elif code is not None:
-        bits.append("未收录的错误码")
-    detail = item.get("detail")
-    if detail and str(detail) not in ("", "None"):
-        bits.append("百度原文：{}".format(detail))
+    raw = item.get("raw")
+    if raw and str(raw) not in ("", "None") and str(raw) != str(detail):
+        bits.append("百度原文：{}".format(raw))
     return " | ".join(bits)
 
 
@@ -629,8 +655,8 @@ def _fmt_growth(growth):
         return "成长等级签到：成功"
     if status == "done":
         return "成长等级签到：今天已经签到过了"
-    detail = growth.get("detail") or tieba_codes.explain(growth.get("code"))
-    return "成长等级签到：失败（{}）".format(detail)
+    detail = growth.get("detail") or "百度没有给出具体原因"
+    return "成长等级签到：没成功（{}）".format(detail)
 
 
 def _fmt_like(like):
@@ -644,8 +670,8 @@ def _fmt_like(like):
         return "随机点赞：今天已经完成"
     if status == "disabled":
         return None
-    return "随机点赞：失败（{}）".format(
-        like.get("detail") or tieba_codes.explain(like.get("code")))
+    return "随机点赞：没成功（{}）".format(
+        like.get("detail") or "百度没有给出具体原因")
 
 
 def _report_lines_for_account(label, acct):
@@ -708,7 +734,7 @@ def report_text(state=None):
         lines.extend(_report_lines_for_account("账号", state))
         lines.append("")
     lines.append("说明：本报告不含完整 BDUSS（只保留掩码）；"
-                 "错误码解释来自代码内置的已核实码表，未收录的会明确写「未收录」。")
+                 "每条失败都写了原因和怎么办，错误码放在后面方便开发者定位。")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -780,7 +806,7 @@ def start_multi(pairs):
             except asyncio.TimeoutError:
                 sub.update(status="error", step="签到超时",
                            finished_at=_now_ms(),
-                           error={"category": "网络异常", "code": None,
+                           error={"category": tieba_codes.CAT_NETWORK, "code": None,
                                   "reason": None,
                                   "detail": "签到超过 15 分钟仍未完成，"
                                             "已停止等待"})
@@ -794,7 +820,7 @@ def start_multi(pairs):
             with _lock:
                 if sub.get("status") not in ("done", "error"):
                     sub.update(status="error", step="签到中断",
-                               error={"category": "未知错误", "code": None,
+                               error={"category": tieba_codes.CAT_UNKNOWN, "code": None,
                                       "reason": None,
                                       "detail": "签到线程异常结束"})
                 batch["account_done"] += 1

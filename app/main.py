@@ -801,20 +801,17 @@ def _page_settings_auto():
         fail_txt = ""
         if r.get("failures"):
             shown = "；".join(
-                "{}（{}）".format(
+                "{}：{}".format(
                     f.get("forum", ""),
-                    "错误码 {} {}".format(f.get("code"),
-                                          f.get("reason") or "").strip()
-                    if f.get("code") is not None
-                    else f.get("category", ""))
+                    f.get("detail") or "百度没有给出具体原因")
                 for f in r["failures"][:3])
             fail_txt = ("<div class='hint'>" + html.escape(shown) + "</div>")
         warn_txt = ""
         if r.get("warnings"):
             shown_w = "；".join(
-                "{}（{}）".format(
+                "{}：{}".format(
                     w.get("forum", ""),
-                    w.get("reason") or w.get("category", ""))
+                    w.get("detail") or "百度没有给出具体原因")
                 for w in r["warnings"][:2])
             warn_txt = ("<div class='hint' style='color:{}'>提醒：{}</div>".format(
                 C_WARN, html.escape(shown_w)))
@@ -1830,26 +1827,32 @@ function renameAcct(id, oldName){
 _JS_SIGN = """
 <script>
 var CAT_COLOR = {"已签到":"#E8930C", "未关注":"#E8930C",
-  "吧不存在":"#E5484D", "账号失效":"#E5484D", "需要验证码":"#E5484D",
-  "网络异常":"#E5484D", "风控限制":"#E5484D", "未知错误":"#E5484D"};
+  "吧不存在":"#E5484D", "登录问题":"#E5484D", "需要验证码":"#E5484D",
+  "网络问题":"#E5484D", "被限制":"#E5484D", "原因不明":"#E5484D"};
 function escTxt(s){
   var d=document.createElement('div');
   d.textContent=(s===null||s===undefined)?'':String(s);
   return d.innerHTML;
 }
-function failLine(f){
-  var bits=[];
-  if(f.category){bits.push(f.category);}
-  if(f.reason){bits.push(f.reason);}
-  if(f.code!==null&&f.code!==undefined){bits.push('错误码 '+f.code);}
-  return bits.join(' · ');
+function plainReason(f){
+  var d=f.reason||f.detail;
+  if(d){return String(d);}
+  return '百度没有给出具体原因';
 }
-function detailLine(f){
-  var d=(f.detail===null||f.detail===undefined)?'':String(f.detail);
-  var r=f.reason?String(f.reason):'';
-  // detail 里已经包含同一条原因时不再重复显示；只有百度原文/额外信息才单独一行。
-  if(r && d.indexOf(r)>=0){return '';}
-  return d;
+function failLine(f){
+  return '原因：'+plainReason(f);
+}
+function adviceLine(f){
+  return f.advice?('怎么办：'+f.advice):'';
+}
+function codeLine(f){
+  if(f.code===null||f.code===undefined){return '';}
+  return '错误码 '+f.code;
+}
+function rawLine(f){
+  var raw=f.raw?String(f.raw):'';
+  if(!raw||raw===plainReason(f)){return '';}
+  return '百度原文：'+raw;
 }
 function growthLine(g){
   if(!g){return '';}
@@ -1857,9 +1860,13 @@ function growthLine(g){
   var c=ok?'#0BA36B':'#E8930C';
   var t=g.status==='success'?'成功':
     (g.status==='done'?'今天已经签到过了':
-     escTxt(g.detail||failLine(g)||'失败'));
-  return '<div class="hint" style="color:'+c+';font-weight:700;margin-top:6px">'+
+     escTxt(g.detail||'百度没有给出具体原因'));
+  var html='<div class="hint" style="color:'+c+';font-weight:700;margin-top:6px">'+
     '成长等级签到：'+t+'</div>';
+  if(!ok&&g.advice){
+    html+='<div class="hint">怎么办：'+escTxt(g.advice)+'</div>';
+  }
+  return html;
 }
 function likeLine(l){
   if(!l||l.status==='disabled'){return '';}
@@ -1882,8 +1889,10 @@ function warningsCard(list){
     var w=list[i];
     html+='<div style="border-bottom:1px solid rgba(127,127,127,.16);padding:9px 0">'+
       '<div style="font-weight:700;font-size:14px">'+escTxt(w.forum)+
-      ' <span style="color:#E8930C;font-size:12px">'+escTxt(failLine(w))+'</span></div>'+
-      (detailLine(w)?'<div class="hint">'+escTxt(detailLine(w))+'</div>':'')+
+      ' <span style="color:#E8930C;font-size:12px">'+escTxt(w.category||'')+'</span></div>'+
+      '<div class="hint" style="font-weight:700">'+escTxt(failLine(w))+'</div>'+
+      (adviceLine(w)?'<div class="hint">'+escTxt(adviceLine(w))+'</div>':'')+
+      (codeLine(w)?'<div class="hint" style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(w))+'</div>':'')+
       '</div>';
   }
   html+='<div class="hint">这些不是失败项，不影响签到结果。</div></div>';
@@ -1908,7 +1917,7 @@ function renderSingle(s){
     var color=(m.status==='success')?'#0BA36B':(CAT_COLOR[m.category]||'#E5484D');
     html+='<div class="hint" style="color:'+color+';font-weight:700;margin-top:8px">'+
       '网页一键签到：'+(m.status==='success'?'成功':
-      escTxt(m.detail||failLine(m)||'失败'))+'</div>';
+      '没成功，已改为逐个吧补签')+'</div>';
   }
   html+=growthLine(s.growth);
   html+=likeLine(s.like);
@@ -1929,7 +1938,8 @@ function renderSingle(s){
   if(s.status==='error'){
     var e=s.error||{};
     html+='<div class="errorbox" style="display:block;margin-top:12px">'+
-      '签到未完成：'+escTxt((e.category?(e.category+'：'):'')+(e.detail||''))+'</div>';
+      '签到未完成：'+escTxt(e.detail||'百度没有给出具体原因')+
+      (e.advice?'<br>怎么办：'+escTxt(e.advice):'')+'</div>';
   }
   html+='</div>';
   html+=warningsCard(s.warnings);
@@ -1942,8 +1952,10 @@ function renderSingle(s){
       html+='<div style="border-bottom:1px solid rgba(0,0,0,.06);padding:10px 0">'+
         '<div style="font-weight:700">'+escTxt(f.forum)+
         ' <span style="color:'+c+';font-size:12px">'+escTxt(f.category)+'</span></div>'+
-        (failLine(f)?'<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>':'')+
-        (detailLine(f)?'<div class="hint">'+escTxt(detailLine(f))+'</div>':'')+'</div>';
+        '<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>'+
+        (adviceLine(f)?'<div class="hint">'+escTxt(adviceLine(f))+'</div>':'')+
+        (codeLine(f)?'<div class="hint" style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(f))+'</div>':'')+
+        '</div>';
     }
     if(s.failures.length>max){
       html+='<div class="hint">还有 '+(s.failures.length-max)+' 条未显示</div>';
@@ -1991,7 +2003,7 @@ function renderMulti(s){
         var mc=(m.status==='success')?'#0BA36B':(CAT_COLOR[m.category]||'#E5484D');
         html+='<div class="hint" style="color:'+mc+';font-weight:700;margin-top:6px">'+
           '网页一键签到：'+(m.status==='success'?'成功':
-          escTxt(m.detail||failLine(m)||'失败'))+'</div>';
+          '没成功，已改为逐个吧补签')+'</div>';
       }
       html+=growthLine(a.growth);
       html+=likeLine(a.like);
@@ -2002,14 +2014,16 @@ function renderMulti(s){
       if(a.status==='error'){
         var e=a.error||{};
         html+='<div class="errorbox" style="display:block;margin-top:8px">'+
-          '签到未完成：'+escTxt((e.category?(e.category+'：'):'')+(e.detail||''))+'</div>';
+          '签到未完成：'+escTxt(e.detail||'百度没有给出具体原因')+
+          (e.advice?'<br>怎么办：'+escTxt(e.advice):'')+'</div>';
       }
       html+='</div>';
       if(a.failures && a.failures.length>0){
         for(var k=0;k<a.failures.length;k++){
           var f=a.failures[k];
           allFails.push({account:a.account_name,forum:f.forum,
-            category:f.category,code:f.code,reason:f.reason,detail:f.detail});
+            category:f.category,code:f.code,reason:f.reason,
+            advice:f.advice,detail:f.detail,raw:f.raw});
         }
       }
       if(a.warnings && a.warnings.length>0){
@@ -2018,7 +2032,7 @@ function renderMulti(s){
           allWarnings.push({account:a.account_name,
             forum:a.account_name+' → '+wn.forum,
             category:wn.category,code:wn.code,reason:wn.reason,
-            detail:wn.detail});
+            advice:wn.advice,detail:wn.detail,raw:wn.raw});
         }
       }
     }
@@ -2046,8 +2060,10 @@ function renderMulti(s){
       html+='<div style="border-bottom:1px solid rgba(0,0,0,.06);padding:10px 0">'+
         '<div style="font-weight:700">'+escTxt(f.account+' → '+f.forum)+
         ' <span style="color:'+c+';font-size:12px">'+escTxt(f.category)+'</span></div>'+
-        (failLine(f)?'<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>':'')+
-        (detailLine(f)?'<div class="hint">'+escTxt(detailLine(f))+'</div>':'')+'</div>';
+        '<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>'+
+        (adviceLine(f)?'<div class="hint">'+escTxt(adviceLine(f))+'</div>':'')+
+        (codeLine(f)?'<div class="hint" style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(f))+'</div>':'')+
+        '</div>';
     }
     if(allFails.length>max){
       html+='<div class="hint">还有 '+(allFails.length-max)+' 条未显示</div>';

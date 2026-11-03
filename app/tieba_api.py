@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Baidu account validation via aiotieba (async loop in a worker thread).
 
 M2.2.2 needs only "is this BDUSS valid?". Categories follow PRD v1.0:
@@ -66,17 +66,24 @@ async def _validate_async(bduss):
     err = getattr(user, "err", None)
     if err is not None:
         code = tieba_codes.parse_code(getattr(err, "code", None))
-        msg = redact.scrub(str(getattr(err, "msg", None) or err), bduss)
+        raw = redact.scrub(str(getattr(err, "msg", None) or err), bduss)
+        reason = tieba_codes.reason(code)
+        advice = tieba_codes.advice(code) or (
+            "重新登录这个账号；如果一直失败，请确认 BDUSS 是否完整")
         if code is None:
-            detail = msg or "百度未返回错误原因"
+            detail = "百度没有给出错误码，这次登录验证没有成功"
+        elif reason:
+            detail = reason
         else:
-            detail = "{}（{}）".format(
-                msg or "百度未返回错误原因", tieba_codes.explain(code))
+            detail = "百度没有给出具体原因，这次登录验证没有成功"
         return {
             "ok": False,
             "category": tieba_codes.CAT_ACCOUNT,
             "code": code,
+            "reason": reason,
+            "advice": advice,
             "detail": redact.scrub(detail, bduss),
+            "raw": raw,
         }
     user_id = getattr(user, "user_id", None)
     user_name = getattr(user, "user_name", None)
@@ -84,8 +91,9 @@ async def _validate_async(bduss):
     if not user_id and not user_name:
         return {
             "ok": False,
-            "category": "账号失效",
-            "detail": "百度未返回用户信息，BDUSS 可能已失效",
+            "category": tieba_codes.CAT_ACCOUNT,
+            "detail": "百度没有返回用户信息，这个账号可能已经掉线",
+            "advice": "重新登录这个账号（删除后重新添加 BDUSS）",
         }
     return {
         "ok": True,
@@ -107,8 +115,9 @@ def validate_bduss(bduss):
     try:
         return future.result(timeout=90)
     except asyncio.TimeoutError:
-        return {"ok": False, "category": "网络异常",
-                "detail": "验证超时（90s），请检查网络后重试"}
+        return {"ok": False, "category": tieba_codes.CAT_NETWORK,
+                "detail": "验证超时，请检查网络后重试",
+                "advice": "检查网络后重试"}
     except Exception as exc:  # noqa: BLE001
         name = type(exc).__name__
         text = redact.scrub(str(exc), bduss)
@@ -117,7 +126,11 @@ def validate_bduss(bduss):
                for k in ("Timeout", "ClientConnector", "ClientOSError",
                          "ClientConnectorError", "Connection", "SSLError",
                          "socket", "OSError")):
-            return {"ok": False, "category": "网络异常",
-                    "detail": "{}: {}".format(name, text[:300])}
-        return {"ok": False, "category": "未知错误",
-                "detail": "{}: {}".format(name, text[:300])}
+            return {"ok": False, "category": tieba_codes.CAT_NETWORK,
+                    "detail": "网络连接出了问题，请检查网络后重试",
+                    "advice": "检查网络后重试",
+                    "raw": "{}: {}".format(name, text[:300])}
+        return {"ok": False, "category": tieba_codes.CAT_UNKNOWN,
+                "detail": "登录验证时出现了异常，请稍后再试",
+                "advice": "稍后再试；如果一直失败，请重新添加账号",
+                "raw": "{}: {}".format(name, text[:300])}

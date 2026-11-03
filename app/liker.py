@@ -98,22 +98,23 @@ def _today():
 
 
 def _describe(err):
+    """返回 (code, reason, advice, detail, raw)；detail 是给普通人看的人话。"""
     code = tieba_codes.parse_code(getattr(err, "code", None))
-    msg = str(getattr(err, "msg", None) or err).strip()
+    raw = redact.scrub(str(getattr(err, "msg", None) or err).strip())
     reason = tieba_codes.reason(code)
+    advice = tieba_codes.advice(code) or (
+        "稍后再试；如果一直失败，把这份签到报告发给开发者")
     if code is None:
-        detail = msg or "未知错误（异常没有错误码）"
+        detail = "百度没有给出错误码，这次点赞没有成功"
     elif reason:
-        detail = "{}（{}）".format(
-            msg or "百度未返回错误原因", tieba_codes.explain(code))
+        detail = reason
     else:
-        detail = "{}（错误码 {}，未收录）".format(
-            msg or "百度未返回错误原因", code)
-    return code, reason, detail
+        detail = "百度没有给出具体原因，这次点赞没有成功"
+    return code, reason, advice, detail, raw
 
 
 def _record(account, ok, fname=None, tid=None, title=None,
-            code=None, reason=None, detail=None):
+            code=None, reason=None, advice=None, detail=None, raw=None):
     data = _load()
     data["accounts"][str(account["id"])] = {
         "date": _today(),
@@ -126,7 +127,9 @@ def _record(account, ok, fname=None, tid=None, title=None,
         "title": redact.scrub(title or "")[:80],
         "code": code,
         "reason": reason,
+        "advice": advice,
         "detail": redact.scrub(detail or ""),
+        "raw": redact.scrub(raw or ""),
     }
     _save(data)
     return data["accounts"][str(account["id"])]
@@ -162,10 +165,12 @@ async def maybe_like_async(client, account, forums, secret=None):
     candidates = [f for f in (forums or [])
                   if str(getattr(f, "fname", "") or "").strip()]
     if not candidates:
-        result = {"status": "error", "category": "未关注",
-                  "code": None, "reason": None,
-                  "detail": "没有可用的关注吧，无法随机点赞"}
-        _record(account, False, detail=result["detail"])
+        detail = "没有可用的关注吧，无法随机点赞"
+        advice = "先在贴吧里关注几个吧，再试一次"
+        result = {"status": "error", "category": tieba_codes.CAT_UNFOLLOWED,
+                  "code": None, "reason": None, "advice": advice,
+                  "detail": detail, "raw": ""}
+        _record(account, False, advice=advice, detail=detail)
         return result
 
     rng = random.SystemRandom()
@@ -176,12 +181,11 @@ async def maybe_like_async(client, account, forums, secret=None):
         try:
             threads = await client.get_threads(fname, pn=1, rn=_RN)
         except Exception as exc:  # noqa: BLE001
-            last_detail = "{}: {}".format(type(exc).__name__,
-                                          redact.scrub(str(exc), secret))
+            last_detail = "网络连接出了问题，这次点赞没有成功"
             continue
         terr = getattr(threads, "err", None)
         if terr is not None:
-            code, reason, detail = _describe(terr)
+            code, reason, advice, detail, raw = _describe(terr)
             last_detail = redact.scrub(detail, secret)
             continue
 
@@ -197,11 +201,15 @@ async def maybe_like_async(client, account, forums, secret=None):
         try:
             resp = await client.agree(tid)
         except Exception as exc:  # noqa: BLE001
-            detail = redact.scrub("{}: {}".format(type(exc).__name__, exc),
-                                  secret)
-            result = {"status": "error", "category": "网络异常",
-                      "code": None, "reason": None, "detail": detail}
-            _record(account, False, fname, tid, title, detail=detail)
+            raw = redact.scrub("{}: {}".format(type(exc).__name__, exc),
+                               secret)
+            detail = "网络连接出了问题，这次点赞没有成功"
+            advice = "检查网络后重试"
+            result = {"status": "error", "category": tieba_codes.CAT_NETWORK,
+                      "code": None, "reason": None, "advice": advice,
+                      "detail": detail, "raw": raw}
+            _record(account, False, fname=fname, tid=tid, title=title,
+                    advice=advice, detail=detail, raw=raw)
             return result
 
         err = getattr(resp, "err", None)
@@ -210,18 +218,23 @@ async def maybe_like_async(client, account, forums, secret=None):
             return {"status": "success", "fname": fname, "tid": tid,
                     "title": redact.scrub(title)[:80], "ts": rec["ts"]}
 
-        code, reason, detail = _describe(err)
-        detail = redact.scrub(detail, secret)
+        code, reason, advice, detail, raw = _describe(err)
         result = {"status": "error",
                   "category": tieba_codes.category_for_code(code) or
-                  "未知错误",
-                  "code": code, "reason": reason, "detail": detail,
+                  tieba_codes.CAT_UNKNOWN,
+                  "code": code, "reason": reason, "advice": advice,
+                  "detail": redact.scrub(detail, secret),
+                  "raw": redact.scrub(raw, secret),
                   "fname": fname, "tid": tid}
-        _record(account, False, fname, tid, title, code, reason, detail)
+        _record(account, False, fname=fname, tid=tid, title=title,
+                code=code, reason=reason, advice=advice,
+                detail=detail, raw=raw)
         return result
 
-    result = {"status": "error", "category": "未知错误",
+    result = {"status": "error", "category": tieba_codes.CAT_UNKNOWN,
               "code": None, "reason": None,
-              "detail": redact.scrub(last_detail, secret)}
-    _record(account, False, detail=result["detail"])
+              "advice": "过一会儿再试；如果一直失败，把这份签到报告发给开发者",
+              "detail": redact.scrub(last_detail, secret), "raw": ""}
+    _record(account, False, advice=result["advice"],
+            detail=result["detail"])
     return result

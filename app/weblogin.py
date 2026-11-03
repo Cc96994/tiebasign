@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """M2.2.3 Baidu WebView login -> extract BDUSS from CookieManager.
 
 CONTAINER WORKAROUND (Zhuoyitong / HarmonyOS NEXT):
@@ -40,6 +40,7 @@ from jnius import autoclass
 import keystore_crypto
 import storage
 import tieba_api
+import tieba_codes
 
 
 # --------------------------------------------------------------------------
@@ -397,7 +398,7 @@ def _run(token):
             if _CANCEL.is_set():
                 return
             result = tieba_api.validate_bduss(bduss)
-            if result.get("ok") or result.get("category") == "账号失效":
+            if result.get("ok") or result.get("category") == tieba_codes.CAT_ACCOUNT:
                 break
             time.sleep(3)
 
@@ -563,7 +564,7 @@ def _run_native(token):
             if _NATIVE_CANCEL.is_set():
                 return
             result = tieba_api.validate_bduss(bduss)
-            if result.get("ok") or result.get("category") == "账号失效":
+            if result.get("ok") or result.get("category") == tieba_codes.CAT_ACCOUNT:
                 break
             time.sleep(3)
 

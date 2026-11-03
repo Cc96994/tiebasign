@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """TiebaSign M2.4 - auto sign scheduler (in-app scheduler + foreground
 keep-alive + launch catch-up).
 
@@ -23,6 +23,7 @@ import time
 import traceback
 
 import redact
+import tieba_codes
 
 _DATA_FILENAME = "tiebasign_autosign.json"
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -405,19 +406,23 @@ def _finalize(account, state):
                    for w in warnings):
             warnings.insert(0, {
                 "forum": "网页一键签到(msign)",
-                "category": msign.get("category") or "未知错误",
+                "category": msign.get("category") or tieba_codes.CAT_UNKNOWN,
                 "code": msign.get("code"),
                 "reason": msign.get("reason"),
+                "advice": msign.get("advice"),
                 "detail": msign.get("detail") or "",
+                "raw": msign.get("raw") or "",
             })
     if state.get("error"):
         failed += 1
         failures.append({
             "forum": "签到流程",
-            "category": (state.get("error") or {}).get("category") or "未知错误",
+            "category": (state.get("error") or {}).get("category") or tieba_codes.CAT_UNKNOWN,
             "code": (state.get("error") or {}).get("code"),
             "reason": (state.get("error") or {}).get("reason"),
+            "advice": (state.get("error") or {}).get("advice"),
             "detail": (state.get("error") or {}).get("detail") or "",
+            "raw": (state.get("error") or {}).get("raw") or "",
         })
 
     ok = (state.get("status") == "done") and failed == 0
@@ -456,10 +461,7 @@ def _notify_text(account, snapshot):
         name, snapshot["success"], snapshot["failed"]))
     shown = []
     for f in snapshot["failures"][:3]:
-        detail = f.get("reason") or f.get("detail") or ""
-        code = f.get("code")
-        if code is not None and "错误码 {}".format(code) not in detail:
-            detail = "错误码 {} {}".format(code, detail).strip()
+        detail = f.get("detail") or "百度没有给出具体原因"
         shown.append("{}（{}）".format(f.get("forum", ""), detail))
     if shown:
         parts.append("；".join(shown))
