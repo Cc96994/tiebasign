@@ -13,7 +13,7 @@ source.dir = ./app
 source.include_exts = py,png
 source.exclude_dirs = p4a_local,vendor,scripts,bin,bin_probe,bin_m21,bin_m22,.buildozer,.git,__pycache__
 
-version = 0.5.2
+version = 0.5.3
 
 # Locked dependency chain (no kivy/sdl2 in the webview route).
 # Recipes: python3 3.12.7 / aiotieba 4.7.1 (local recipe, NDK crypto +

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""随机点赞离线自检（v0.5.2，独立模块版）。
+"""随机点赞离线自检（v0.5.3，独立模块版）。
 
 运行：python3 scripts/tests/test_liker.py
 

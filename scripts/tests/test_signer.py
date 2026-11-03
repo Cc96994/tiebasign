@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""签到引擎离线自检（v0.5.2）。
+"""签到引擎离线自检（v0.5.3）。
 
 运行：python3 scripts/tests/test_signer.py   （在仓库根目录）
 
-覆盖的是 v0.5.2 新增/改动的三块，全部离线、不联网、不碰 Android：
+覆盖的是 v0.5.3 新增/改动的三块，全部离线、不联网、不碰 Android：
 
   1. 错误码表：已知码必须给出分类、普通人能看懂的原因和「怎么办」；未知码必须
      明确说「百度没有给出具体原因」，而不是编一个。
@@ -66,6 +66,12 @@ def test_codes():
           "太快" in (tieba_codes.reason(340011) or ""))
     check("3280004 原因=操作太频繁",
           "频繁" in (tieba_codes.reason(3280004) or ""))
+    check("340001 分类=被限制",
+          tieba_codes.category_for_code(340001) == tieba_codes.CAT_RISK)
+    check("340001 原因=吧暂时被关闭",
+          "关闭" in (tieba_codes.reason(340001) or ""))
+    check("340001 建议=换一个吧",
+          "换一个吧" in (tieba_codes.advice(340001) or ""))
     check("340006 分类=风控限制",
           tieba_codes.category_for_code(340006) == tieba_codes.CAT_RISK)
     check("110000 分类=账号失效",

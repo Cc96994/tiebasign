@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""吧群签到离线自检（v0.5.2）。
+"""吧群签到离线自检（v0.5.3）。
 
 运行：python3 scripts/tests/test_groupsign.py   （在仓库根目录）
 

@@ -83,18 +83,18 @@ def render_all():
 
     states = (
         ("空闲", {}),
-        ("发现新版本", {"phase": "available", "dot": True, "detail": "发现 v0.5.3",
-                   "latest": {"version": "0.5.3", "version_code": 1023530,
-                              "tag": "v0.5.3", "source": "github",
+        ("发现新版本", {"phase": "available", "dot": True, "detail": "发现 v0.5.4",
+                   "latest": {"version": "0.5.4", "version_code": 1023504,
+                              "tag": "v0.5.4", "source": "github",
                               "source_label": "GitHub", "apk_name": "a.apk",
                               "sha256": "ab" * 32, "size": 20670000,
                               "notes": "说明", "found_at": "2026-10-16 00:00:00"}}),
         ("已下载", {"phase": "ready", "dot": True, "detail": "已下载并通过校验",
                  "downloaded": {"path": "/data/x.apk", "name": "a.apk",
                                 "sha256": "cd" * 32, "size": 20670000,
-                                "version": "0.5.3", "version_code": 1023530,
+                                "version": "0.5.4", "version_code": 1023504,
                                 "source": "gitee", "ts": "2026-10-16 00:00:00"},
-                 "latest": {"version": "0.5.3", "version_code": 1023530,
+                 "latest": {"version": "0.5.4", "version_code": 1023504,
                             "source_label": "Gitee"}}),
         ("出错且各源都有报告", {"phase": "error", "detail": "网络不可达",
                         "reports": [{"source": "github", "label": "GitHub",
@@ -106,7 +106,7 @@ def render_all():
                                      "status": "ok", "tag": "V0.2.0",
                                      "releases": 3}],
                         "history": [{"ts": "2026-10-16 00:00:00",
-                                     "summary": "查到 v0.5.3"}]}),
+                                     "summary": "查到 v0.5.4"}]}),
     )
     for label, kw in states:
         set_state(**kw)
@@ -132,14 +132,14 @@ def page_content_checks():
           "检查更新" in settings_html and "发现 v" not in settings_html)
 
     set_state(phase="available", dot=True,
-              latest={"version": "0.5.3", "version_code": 1023530})
+              latest={"version": "0.5.4", "version_code": 1023504})
     check("设置页发现新版本时显示版本号",
-          "检查更新 · 发现 v0.5.3" in main._page_settings())
+          "检查更新 · 发现 v0.5.4" in main._page_settings())
 
     set_state(phase="ready", dot=True,
-              downloaded={"version": "0.5.3", "path": "/x.apk"})
+              downloaded={"version": "0.5.4", "path": "/x.apk"})
     check("设置页已下载时显示待安装",
-          "v0.5.3 已下载，待安装" in main._page_settings())
+          "v0.5.4 已下载，待安装" in main._page_settings())
 
     # 红点：只在设置页那个 tab 上，且只在真的查到东西时
     set_state(dot=True)
@@ -151,7 +151,7 @@ def page_content_checks():
     check("_update_dot() 读不到状态时不抛异常",
           main._update_dot() in (True, False))
 
-    # v0.5.3：签到页要有报告入口，报告页要能渲染（失败详情导出）
+    # v0.5.4：签到页要有报告入口，报告页要能渲染（失败详情导出）
     sign_html = main._page_sign()
     check("签到页有「查看签到报告」入口", "/sign/report" in sign_html)
     report_html = main._page_sign_report()
@@ -195,7 +195,7 @@ def page_content_checks():
 
     # 更新页：按钮与文案
     set_state(phase="available",
-              latest={"version": "0.5.3", "version_code": 1023530})
+              latest={"version": "0.5.4", "version_code": 1023504})
     page = main._page_settings_update()
     check("更新页有「立即检查」按钮", "id='up_check'" in page and "立即检查" in page)
     check("更新页有「下载更新」按钮", "id='up_download'" in page)
@@ -209,7 +209,7 @@ def page_content_checks():
 
     set_state(phase="ready",
               downloaded={"path": "/data/app/update/a.apk", "size": 20670000,
-                          "sha256": "cd" * 32, "version": "0.5.3"})
+                          "sha256": "cd" * 32, "version": "0.5.4"})
     page = main._page_settings_update()
     check("已下载时更新页给出「立即安装」按钮", "id='up_install'" in page)
     check("已下载时更新页显示体积（19.7 MB）",
@@ -349,14 +349,14 @@ def http_checks():
 # --------------------------------------------------------------- 新加的小件
 def unit_checks():
     check("_progress_text 有百分比与 MB",
-          updater._progress_text("0.5.3", 5 * 1024 * 1024, 20 * 1024 * 1024)
-          == "正在下载 v0.5.3… 25%（5 / 20 MB）",
-          updater._progress_text("0.5.3", 5 * 1024 * 1024, 20 * 1024 * 1024))
+          updater._progress_text("0.5.4", 5 * 1024 * 1024, 20 * 1024 * 1024)
+          == "正在下载 v0.5.4… 25%（5 / 20 MB）",
+          updater._progress_text("0.5.4", 5 * 1024 * 1024, 20 * 1024 * 1024))
     check("_progress_text 没 Content-Length 时只说已下多少",
-          updater._progress_text("0.5.3", 3 * 1024 * 1024, 0)
-          == "正在下载 v0.5.3… 已下 3 MB")
+          updater._progress_text("0.5.4", 3 * 1024 * 1024, 0)
+          == "正在下载 v0.5.4… 已下 3 MB")
     check("_progress_text 进度不会超过 100%",
-          "100%" in updater._progress_text("0.5.3", 30 * 1024 * 1024,
+          "100%" in updater._progress_text("0.5.4", 30 * 1024 * 1024,
                                           20 * 1024 * 1024))
     set_state(dot=True)
     check("dot_pending 读到 True", updater.dot_pending() is True)

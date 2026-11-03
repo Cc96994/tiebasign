@@ -606,7 +606,7 @@ def _page_settings():
         "<span>吧群签到设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.5.2 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.5.3 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -2534,27 +2534,22 @@ function moduleFailures(list,prefix){
   if(!list||!list.length){return h;}
   var total=Math.min(list.length,100);
   var shown=Math.min(total,3);
-  for(var i=0;i<shown;i++){
-    var f=list[i];
-    h+='<div class="hint" style="border-top:1px solid rgba(127,127,127,.12);padding-top:6px;margin-top:6px">'+
-      '<b>'+escTxt((prefix||'')+(f.forum||f.account||''))+'</b><br>'+
-      escTxt(failLine(f))+
-      (adviceLine(f)?'<br>'+escTxt(adviceLine(f)):'')+
-      (codeLine(f)?'<br><span style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(f))+'</span>':'')+
+  function row(f){
+    var c=CAT_COLOR[f.category]||'#E5484D';
+    var title=(prefix||'')+(f.forum||f.account||'');
+    return '<div style="border-bottom:1px solid rgba(0,0,0,.06);padding:10px 0">'+
+      '<div style="font-weight:700">'+escTxt(title)+
+      (f.category?' <span style="color:'+c+';font-size:12px">'+escTxt(f.category)+'</span>':'')+'</div>'+
+      '<div class="hint" style="font-weight:700">'+escTxt(failLine(f))+'</div>'+
+      (adviceLine(f)?'<div class="hint">'+escTxt(adviceLine(f))+'</div>':'')+
+      (codeLine(f)?'<div class="hint" style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(f))+'</div>':'')+
       '</div>';
   }
+  for(var i=0;i<shown;i++){h+=row(list[i]);}
   if(total>shown){
     h+='<div class="hint" style="margin-top:6px"><a href="javascript:void(0)" '+
       'onclick="showMore(this)">展开全部（'+list.length+'）</a></div><div style="display:none">';
-    for(var j=shown;j<total;j++){
-      var g=list[j];
-      h+='<div class="hint" style="border-top:1px solid rgba(127,127,127,.12);padding-top:6px;margin-top:6px">'+
-        '<b>'+escTxt((prefix||'')+(g.forum||g.account||''))+'</b><br>'+
-        escTxt(failLine(g))+
-        (adviceLine(g)?'<br>'+escTxt(adviceLine(g)):'')+
-        (codeLine(g)?'<br><span style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(g))+'</span>':'')+
-        '</div>';
-    }
+    for(var j=shown;j<total;j++){h+=row(list[j]);}
     h+='</div>';
   }
   if(list.length>100){h+='<div class="hint">还有 '+(list.length-100)+' 条未显示</div>';}
