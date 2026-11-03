@@ -1,4 +1,4 @@
-# ROADMAP —— v0.5.2（待发布）与下一版计划
+﻿# ROADMAP —— v0.5.2（待发布）与下一版计划
 
 最后更新：2026-11-03
 
@@ -15,7 +15,7 @@
 | 每日随机点赞 | **已完成（独立模块）** | `app/liker.py`：每个关注的吧随机抽 1 个帖子点主楼赞，每吧每天最多一次；签到页有独立「随机点赞」按钮；失败只记详情，不影响签到 |
 
 其余不变：版本号已同步到 `buildozer_webview_app.spec`、`app/main.py` 与
-`app/updater.py`（0.5.2 / 1023520）；`scripts/app_identity.sh` 的「上一版事实」
+`app/updater.py`（0.5.2 / 1023502）；`scripts/app_identity.sh` 的「上一版事实」
 已更新为已发布的 0.4.0（versionCode 1023400、APK sha256 `3c300ce4…47cdfe`）。
 
 ## 已定下的路线（不要再动摇）

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """TiebaSign v0.4.0 - 功能一：检查更新 + 自动下载 + 唤醒系统安装界面。
 
 用户确认（2026-10-15 第三轮，别再按旧设计改回去）
@@ -52,7 +52,7 @@ _SCHEMA = 1
 #      强制校验：versionCode 必须等于 APK 实测值，version 必须等于 spec 的
 #      version / main.py 里用户看得见的那串。改版本号时三处一起改。）--------
 _APP_VERSION = "0.5.2"
-_APP_VERSION_CODE = 1023520
+_APP_VERSION_CODE = 1023502
 _PACKAGE = "org.dsh.tiebaweb"
 # 只允许这个签名密钥签出来的包被装上去（与 scripts/app_identity.sh 的
 # APP_PREV_SIGNER_SHA256 是同一个值）。

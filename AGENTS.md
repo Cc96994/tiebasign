@@ -1,4 +1,4 @@
-# AGENTS.md
+﻿# AGENTS.md
 
 > 面向：在本仓库里干活的自动化 agent（superagent worker、编码助手、任何接了 issue 就动手的东西）。
 > 先读完这一页再改文件。下面每一条都是踩过的坑，不是风格偏好。

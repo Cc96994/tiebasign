@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """updater 离线自检：不联网、不碰 Android，只验证解析 / 判定 / 校验 / 调度。
 
 运行：python test_updater.py     （在仓库根目录运行；日志写到临时目录，不写进项目）
@@ -601,7 +601,7 @@ check("selftest: 落盘成功且文件存在", os.path.isfile(path), path)
 state = updater.get_state()
 check("get_state: 当前版本与 spec 一致",
       state["current"]["version"] == "0.5.2"
-      and state["current"]["version_code"] == 1023520, state["current"])
+      and state["current"]["version_code"] == 1023502, state["current"])
 check("get_state: 包名是 org.dsh.tiebaweb",
       state["current"]["package"] == "org.dsh.tiebaweb")
 check("get_state: 两个源都在", [s["id"] for s in state["sources"]] == ["github", "gitee"])
