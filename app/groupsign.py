@@ -35,10 +35,14 @@ import tieba_codes
 import tieba_api
 
 try:
-    import certifi
-    _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
-except Exception:  # noqa: BLE001 - 桌面/旧包没有 certifi 时退回系统证书
-    _SSL_CONTEXT = ssl.create_default_context()
+    # 优先复用 aiotieba 已被本项目补丁修好的 SSL 上下文（真机上已验证可用）。
+    from aiotieba.core.http import _SSL_CONTEXT as _SSL_CONTEXT
+except Exception:  # noqa: BLE001 - 桌面/未打补丁时退回 certifi
+    try:
+        import certifi
+        _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001
+        _SSL_CONTEXT = ssl.create_default_context()
 
 _DATA_FILENAME = "tiebasign_groupsign.json"
 _DEFAULT_TEXT = "@群助手/领取今日福利"
