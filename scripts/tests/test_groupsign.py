@@ -16,6 +16,8 @@ import json
 import os
 import sys
 import tempfile
+import time
+import types
 
 APP_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(
@@ -64,6 +66,17 @@ class FakeClient:
     async def send_chatroom_msg(self, chatroom_id, fid, text):
         self.sent.append((chatroom_id, fid, text))
         return FakeResp(self.send_err)
+
+
+class FakeAioClient(FakeClient):
+    def __init__(self, bduss=None):
+        super().__init__()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
 
 
 ACCOUNT = {"id": 1, "name": "示例账号", "mask": "abCD****wxyz"}
@@ -194,8 +207,32 @@ def test_add_parse_and_manage():
         check("删除后为空",
               groupsign.get_settings()["accounts"] == [] or
               not groupsign.get_settings()["accounts"][0]["groups"])
+        manual, merr = groupsign.add_group(
+            1, "", chatroom_id="8184512479", fid="15965047",
+            name="签到欢迎群")
+        check("读取群信息失败时可手动填吧ID添加",
+              manual and not merr and manual["fid"] == 15965047, merr)
     finally:
         groupsign._fetch_card = old_fetch
+
+
+def test_start_standalone():
+    reset()
+    seed([group(8184512479, 15965047)])
+    groupsign._state = None
+    fake = types.ModuleType("aiotieba")
+    fake.Client = FakeAioClient
+    sys.modules["aiotieba"] = fake
+    rid, err = groupsign.start([(ACCOUNT, "fake-bduss")])
+    check("独立模块 start 成功", rid is not None and err is None, err)
+    deadline = time.time() + 5
+    state = groupsign.get_state()
+    while state.get("status") != "done" and time.time() < deadline:
+        time.sleep(0.02)
+        state = groupsign.get_state()
+    check("独立模块跑完", state.get("status") == "done", state)
+    sub = (state.get("accounts") or [{}])[0]
+    check("独立模块发送成功 1 个群", sub.get("sent") == 1, sub)
 
 
 def main():
@@ -205,6 +242,7 @@ def main():
     print("== 账号错误 =="); test_account_error_stops_remaining()
     print("== 空/关闭 =="); test_no_groups_and_disabled()
     print("== 群管理 =="); test_add_parse_and_manage()
+    print("== 独立模块 =="); test_start_standalone()
     print()
     print("{} checks, {} failed".format(TOTAL[0], len(FAILS)))
     if FAILS:

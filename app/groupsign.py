@@ -21,15 +21,24 @@
 只取 ``chatroom_id``，再用公开的 ``/mo/q/chat/getCardInfo`` 补全群名与 fid。
 """
 
+import asyncio
 import json
 import os
 import re
+import ssl
 import threading
 import time
 import urllib.request
 
 import redact
 import tieba_codes
+import tieba_api
+
+try:
+    import certifi
+    _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except Exception:  # noqa: BLE001 - 桌面/旧包没有 certifi 时退回系统证书
+    _SSL_CONTEXT = ssl.create_default_context()
 
 _DATA_FILENAME = "tiebasign_groupsign.json"
 _DEFAULT_TEXT = "@群助手/领取今日福利"
@@ -128,6 +137,18 @@ def _save(data):
         os.replace(tmp, path)
 
 
+def _log(msg):
+    try:
+        base = os.environ.get("ANDROID_PRIVATE") or os.getcwd()
+        with open(os.path.join(base, "groupsign.log"), "a",
+                  encoding="utf-8") as fh:
+            fh.write("[{}] {}\n".format(
+                time.strftime("%m-%d %H:%M:%S"), redact.scrub(str(msg))))
+            fh.flush()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _account(data, account_id):
     aid = str(account_id)
     acct = data["accounts"].get(aid)
@@ -188,12 +209,16 @@ def _fetch_card(chatroom_id):
     req = urllib.request.Request(_CARD_URL.format(chatroom_id),
                                  headers={"User-Agent": _UA})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15,
+                                    context=_SSL_CONTEXT) as resp:
             raw = resp.read()
         payload = json.loads(raw.decode("utf-8", "replace"))
-    except Exception as exc:  # noqa: BLE001 - 网络/解析失败都给人话
-        return None, "读取群信息失败，请检查网络后重试（{}）".format(
-            type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 - 网络/证书/解析失败都给人话
+        _log("getCardInfo failed chatroom_id={} {}: {}".format(
+            chatroom_id, type(exc).__name__, exc))
+        return None, ("读取群信息失败（{}），请重试；如果一直失败，"
+                      "可以在下面手动填写吧ID/群名".format(
+                          type(exc).__name__))
     if not isinstance(payload, dict) or int(payload.get("no") or 0) != 0:
         reason = str(payload.get("error") or "百度没有返回这个群的信息") \
             if isinstance(payload, dict) else "百度没有返回这个群的信息"
@@ -211,19 +236,38 @@ def _fetch_card(chatroom_id):
         return None, "群信息格式异常，无法添加"
 
 
-def add_group(account_id, url, text=None):
-    chatroom_id = _extract_chatroom_id(url)
-    if not chatroom_id:
-        return None, "链接里没有 chatroom_id，请粘贴群分享链接"
-    group, err = _fetch_card(chatroom_id)
-    if err:
-        return None, err
+def add_group(account_id, url=None, text=None, chatroom_id=None,
+              fid=None, name=None):
+    """添加群。优先用分享链接自动取群信息；也可手动给 chatroom_id + fid。
+
+    手动模式是为 Android 上 ``getCardInfo`` 证书/网络失败准备的兜底：
+    fid（吧ID）是 ``send_chatroom_msg`` 必需的，群名只用于展示。
+    """
+    cid = _extract_chatroom_id(chatroom_id) or _extract_chatroom_id(url)
+    if not cid:
+        return None, "链接里没有 chatroom_id，请粘贴群分享链接或手动填写"
+    try:
+        manual_fid = int(fid) if fid not in (None, "") else 0
+    except (TypeError, ValueError):
+        manual_fid = 0
+    if manual_fid > 0:
+        group = {
+            "chatroom_id": cid,
+            "fid": manual_fid,
+            "name": redact.scrub(str(name or "吧群")),
+            "forum_name": "",
+            "text": "",
+        }
+    else:
+        group, err = _fetch_card(cid)
+        if err:
+            return None, err
     if not group.get("fid"):
         return None, "这个群没有关联的吧，暂时无法发送"
     group["text"] = _clean_text(text)
     data = _load()
     acct = _account(data, account_id)
-    if any(int(g["chatroom_id"]) == chatroom_id for g in acct["groups"]):
+    if any(int(g["chatroom_id"]) == cid for g in acct["groups"]):
         return None, "这个群已经添加过了"
     acct["groups"].append(group)
     _save(data)
@@ -415,3 +459,121 @@ async def run_account_async(client, account, secret=None):
     return {"status": "done", "sent": sent, "skipped": skipped,
             "failed": failed, "total": len(groups),
             "details": details, "warnings": warnings}
+
+
+# --------------------------------------------------------------------------
+# 独立模块：签到页上的「开始吧群签到」按钮
+# --------------------------------------------------------------------------
+
+_state = None
+_run_counter = 0
+
+
+def _new_state(run_id, pairs):
+    accounts = []
+    for account, _bduss in pairs:
+        accounts.append({
+            "account_id": account["id"],
+            "account_name": account.get("name") or account.get("mask") or "",
+            "account_mask": account.get("mask") or "",
+            "status": "pending",
+            "step": "等待中",
+            "total": 0,
+            "sent": 0,
+            "skipped": 0,
+            "failed": 0,
+            "details": [],
+            "warnings": [],
+            "error": None,
+        })
+    return {"run_id": run_id, "status": "starting", "step": "准备中",
+            "mode": "groupsign", "account_total": len(accounts),
+            "account_done": 0, "accounts": accounts,
+            "started_at": int(time.time() * 1000), "finished_at": None}
+
+
+def get_state():
+    with _lock:
+        if _state is None:
+            return {"status": "idle"}
+        snap = dict(_state)
+        snap["accounts"] = []
+        for sub in _state["accounts"]:
+            item = dict(sub)
+            item["details"] = list(sub["details"])
+            item["warnings"] = list(sub["warnings"])
+            snap["accounts"].append(item)
+        return snap
+
+
+def _update_account(account_id, **kwargs):
+    with _lock:
+        if _state is None:
+            return
+        for sub in _state["accounts"]:
+            if sub["account_id"] == account_id:
+                sub.update(kwargs)
+                return
+
+
+async def _run_one(account, bduss):
+    import aiotieba
+    async with aiotieba.Client(bduss) as client:
+        return await run_account_async(client, account, bduss)
+
+
+def start(pairs):
+    """pairs: [(account_dict, bduss_str), ...]；独立于吧签到执行。"""
+    global _state, _run_counter
+    with _lock:
+        if _state is not None and _state["status"] in ("starting", "running"):
+            return None, "吧群签到正在进行，请等待完成"
+        if not pairs:
+            return None, "未选择要执行吧群签到的账号"
+        _run_counter += 1
+        run_id = "gs{:d}".format(_run_counter)
+        _state = _new_state(run_id, pairs)
+
+    def _worker():
+        loop = tieba_api._ensure_loop()
+        for idx, (account, bduss) in enumerate(pairs):
+            sub = _state["accounts"][idx] if _state is not None else None
+            if sub is None:
+                break
+            _update_account(account["id"], status="running", step="准备中")
+            future = asyncio.run_coroutine_threadsafe(
+                _run_one(account, bduss), loop)
+            try:
+                result = future.result(timeout=1800)
+                _update_account(
+                    account["id"], status=(
+                        "done" if result.get("status") != "error" else "error"),
+                    step="完成", total=result.get("total") or 0,
+                    sent=result.get("sent") or 0,
+                    skipped=result.get("skipped") or 0,
+                    failed=result.get("failed") or 0,
+                    details=result.get("details") or [],
+                    warnings=result.get("warnings") or [])
+            except asyncio.TimeoutError:
+                _update_account(account["id"], status="error",
+                                step="超时",
+                                error={"detail": "吧群签到超过 30 分钟仍未完成"})
+            except Exception as exc:  # noqa: BLE001
+                _update_account(account["id"], status="error",
+                                step="异常",
+                                error={"detail": "{}: {}".format(
+                                    type(exc).__name__, exc)})
+            with _lock:
+                if _state is not None:
+                    _state["account_done"] += 1
+                    _state["step"] = "账号进度 {}/{}".format(
+                        _state["account_done"], _state["account_total"])
+        with _lock:
+            if _state is not None:
+                _state["status"] = "done"
+                _state["step"] = "吧群签到完成"
+                _state["finished_at"] = int(time.time() * 1000)
+
+    threading.Thread(target=_worker, name="tieba-groupsign-worker",
+                     daemon=True).start()
+    return run_id, None

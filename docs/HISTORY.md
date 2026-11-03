@@ -50,7 +50,7 @@ Gitee 有仓库但**没有发行版**，备用更新源仍未生效。
   （自动水贴 / 一键水贴）、`java_src/`（ApkProvider 等）、把 `third_party/` 与 `vendor/` 纳入仓库。
   上传集改为由 `scripts/gen_github_src.sh` 生成，不再手工挑文件。
 - **0.5.0（2026-11-03 源码完成）**：新增 `tieba_codes.py`（错误码 → 中文原因）、`redact.py`
-  （日志/报告脱敏）、`liker.py`（每账号每天随机点赞 1 个帖子）、`sign.log` + `/sign/report`
+  （日志/报告脱敏）、`liker.py`（每个关注的吧随机 1 个帖子，独立模块）、`sign.log` + `/sign/report`
   导出、逐吧补签有上限并发、msign 失败降级为 warnings；`scripts/check_history_secrets.sh`
   把 git 历史纳入泄露门禁，文档里的真实账号标识替换为虚构值。成长等级签到已接入；
   群聊「吧群签到」改为按用户确认的机制实现：在指定群发自定义消息（如

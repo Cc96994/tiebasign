@@ -60,6 +60,9 @@ _import_marker("py:waterpost")
 import groupsign  # noqa: E402
 _import_marker("py:groupsign")
 
+import liker  # noqa: E402
+_import_marker("py:liker")
+
 import updater  # noqa: E402
 _import_marker("py:updater")
 
@@ -485,7 +488,8 @@ def _page_sign():
         "<div class='topbar'>签到</div><main>"
         "<div class='card'><div class='title'>选择要签到的账号（可多选）</div>"
         "<div class='hint'>默认勾选当前账号；也可手动勾选多个账号依次签到。"
-        "这一组勾选同时用于下面的「一键签到」和「一键水贴」。</div>"
+        "这一组勾选同时用于下面的「一键签到」「一键水贴」「随机点赞」和"
+        "「吧群签到」。</div>"
         "{}</div>"
         "<div class='card'><div class='title'>一键签到</div>"
         "<div class='hint'>网页一键签到 + 关注吧查漏补签（并发请求，单次执行"
@@ -497,6 +501,22 @@ def _page_sign():
         "<div class='hint' style='margin-top:10px'>"
         "<a href='/sign/report'>查看 / 复制最近一次签到报告</a></div></div>"
         "<div id='sign_state'></div>"
+        "<div class='card'><div class='title'>随机点赞</div>"
+        "<div class='hint'>每个关注的吧随机抽 <b>1 个帖子</b>点主楼赞；每个吧"
+        "每天最多一次，全部完成后当天不再点。只点主楼赞，失败不影响签到。</div>"
+        "<div class='btn-row' style='margin-top:12px'>"
+        "<button class='btn btn-primary' id='like_btn' type='button'>"
+        "开始随机点赞</button></div></div>"
+        "<div id='like_state'></div>"
+        "<div class='card'><div class='title'>吧群签到</div>"
+        "<div class='hint'>按「吧群签到设置」里配置的群发送自定义消息；"
+        "每个群每天发送成功后不再发，失败可重试（每天最多 3 次），"
+        "不影响吧签到。</div>"
+        "<div class='btn-row' style='margin-top:12px'>"
+        "<button class='btn btn-primary' id='gs_btn' type='button'>"
+        "开始吧群签到</button>"
+        "<a class='btn btn-ghost' href='/settings/groupsign'>设置</a></div></div>"
+        "<div id='gs_state'></div>"
         "<div class='card'><div class='title'>一键水贴</div>"
         "<div class='hint'>立刻把勾选账号<b>今天还差几条</b>一次发完。比如设置"
         "每天 4 次，每个目标帖就补到 4 条；发完今天就不再自动发。<br>"
@@ -856,11 +876,6 @@ def _page_settings_auto():
         "<input type='checkbox' id='notify_dot'{}></label>"
         "<div class='hint'>自动签到全部成功时不会提醒；只有出现失败才按上面两个"
         "开关分别通知。手动签到永不通知、永不出红点。</div></div>"
-        "<div class='card'><div class='title'>每日随机点赞</div>"
-        "<label class='menu-item'><span>每个账号每天随机点赞 1 个帖子</span>"
-        "<input type='checkbox' id='daily_like'{}></label>"
-        "<div class='hint'>从该账号关注吧的最新主题帖里随机选一个，只点主楼赞；"
-        "每天最多 1 次。点赞失败不影响签到结果，也不会发通知。</div></div>"
         "<div class='card'><div class='title'>各账号时间</div>{}</div>"
         "<div class='card'><div class='title'>最近一次自动签到结果</div>{}</div>"
         "<div class='btn-row'>"
@@ -878,7 +893,6 @@ def _page_settings_auto():
         html.escape(st["global_time"]),
         " checked" if st["notify_system"] else "",
         " checked" if st["notify_dot"] else "",
-        " checked" if st.get("daily_like", True) else "",
         "".join(acc_rows), "".join(result_rows))
     script = """
 <script>
@@ -903,7 +917,6 @@ var payload={enabled:document.getElementById('enabled').checked,
 global_time:document.getElementById('global_time').value,
 notify_system:document.getElementById('notify_system').checked,
 notify_dot:document.getElementById('notify_dot').checked,
-daily_like:document.getElementById('daily_like').checked,
 accounts:collectAccounts()};
 fetch('/api/auto/settings',{method:'POST',
 headers:{'Content-Type':'application/json'},
@@ -1243,6 +1256,10 @@ def _page_settings_groupsign():
             "<input class='input' id='gs_url_{}' "
             "placeholder='https://tieba.baidu.com/mo/q/wise-main-share/"
             "chatShare?chatroom_id=...'></div>"
+            "<div class='form'><label>吧ID（可选，自动读取失败时手填）</label>"
+            "<input class='input' id='gs_fid_{}' placeholder='例如 123456'></div>"
+            "<div class='form'><label>群名（可选，手动添加时用）</label>"
+            "<input class='input' id='gs_name_{}' placeholder='签到欢迎群'></div>"
             "<div class='form'><label>发送内容（留空用上面的默认内容）</label>"
             "<input class='input' id='gs_newtext_{}' placeholder='{}'></div>"
             "<button class='btn btn-primary' type='button' "
@@ -1250,8 +1267,8 @@ def _page_settings_groupsign():
             "<div class='errorbox' id='gs_err_{}'></div></div>".format(
                 html.escape(acct.get("name") or "贴吧账号"),
                 html.escape(acct.get("mask") or ""),
-                "".join(rows), aid, aid, html.escape(default_text, quote=True),
-                aid, aid))
+                "".join(rows), aid, aid, aid, aid,
+                html.escape(default_text, quote=True), aid, aid))
 
     if not cards:
         cards.append("<div class='empty'><p>还没有账号</p>"
@@ -1304,9 +1321,11 @@ else{gsErr('gs_err_settings',j.detail||'保存失败');}})
 }
 function gsAdd(aid){
 var url=document.getElementById('gs_url_'+aid).value.trim();
+var fid=document.getElementById('gs_fid_'+aid).value.trim();
+var name=document.getElementById('gs_name_'+aid).value.trim();
 var text=document.getElementById('gs_newtext_'+aid).value.trim();
-if(!url){gsErr('gs_err_'+aid,'请先粘贴群分享链接');return;}
-gsPost('/api/groupsign/groups',{account_id:aid,url:url,text:text})
+if(!url&&!fid){gsErr('gs_err_'+aid,'请先粘贴群分享链接，或手动填写 chatroom_id 和吧ID');return;}
+gsPost('/api/groupsign/groups',{account_id:aid,url:url,fid:fid,name:name,text:text})
 .then(function(j){if(j.ok){gsToast('已添加群');setTimeout(function()
 {location.reload();},500);}else{gsErr('gs_err_'+aid,j.detail||'添加失败');}})
 .catch(function(e){gsErr('gs_err_'+aid,'请求失败：'+e);});
@@ -1496,6 +1515,10 @@ class AppHandler(BaseHTTPRequestHandler):
                                   "accounts": storage.list_accounts()})
             elif path == "/api/sign/state":
                 _send_json(self, {"ok": True, "state": signer.get_state()})
+            elif path == "/api/like/state":
+                _send_json(self, {"ok": True, "state": liker.get_state()})
+            elif path == "/api/groupsign/state":
+                _send_json(self, {"ok": True, "state": groupsign.get_state()})
             elif path == "/api/waterpost/manual/state":
                 _send_json(self, {"ok": True,
                                   "state": waterpost.get_manual_state()})
@@ -1533,6 +1556,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._api_weblogin_start()
             elif path == "/api/sign/start":
                 self._api_sign_start(data)
+            elif path == "/api/like/start":
+                self._api_like_start(data)
+            elif path == "/api/groupsign/start":
+                self._api_groupsign_start(data)
             elif path == "/api/auto/settings":
                 self._api_auto_settings(data)
             elif path == "/api/auto/run-now":
@@ -1660,6 +1687,75 @@ class AppHandler(BaseHTTPRequestHandler):
         _send_json(self, {"ok": True, "run_id": run_id,
                           "account_total": len(pairs)})
 
+    def _pairs_for_ids(self, raw_ids):
+        """把 account_ids 解成 [(account, bduss)]；失败返回 (None, error_dict)。"""
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return None, {"ok": False, "category": "未选择",
+                          "detail": "请至少勾选一个账号"}
+        wanted = []
+        for item in raw_ids:
+            try:
+                wanted.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        if not wanted:
+            return None, {"ok": False, "category": "未选择",
+                          "detail": "请至少勾选一个账号"}
+        all_accounts = storage.list_accounts()
+        selected = [a for a in all_accounts if a.get("id") in wanted]
+        if not selected:
+            return None, {"ok": False, "category": "无账号",
+                          "detail": "勾选的账号不存在，请刷新后重试"}
+        pairs = []
+        for account in selected:
+            enc = storage.get_encrypted_bduss(account["id"])
+            if not enc:
+                return None, {"ok": False, "category": "存储错误",
+                              "detail": "账号「{}」没有可用的登录凭据".format(
+                                  account["name"] or account["mask"])}
+            try:
+                bduss = keystore_crypto.decrypt_text(enc)
+            except Exception as exc:  # noqa: BLE001
+                return None, {"ok": False, "category": "存储错误",
+                              "detail": "账号「{}」BDUSS 解密失败（{}: {}），"
+                                        "请删除后重新添加".format(
+                                            account["name"] or account["mask"],
+                                            type(exc).__name__, exc)}
+            fmt_err = tieba_api.format_check(bduss)
+            if fmt_err:
+                return None, {"ok": False, "category": "格式错误",
+                              "detail": "账号「{}」：{}".format(
+                                  account["name"] or account["mask"],
+                                  fmt_err)}
+            pairs.append((account, bduss))
+        return pairs, None
+
+    def _api_like_start(self, data):
+        pairs, err = self._pairs_for_ids(data.get("account_ids"))
+        if err:
+            _send_json(self, err)
+            return
+        run_id, msg = liker.start(pairs)
+        if msg:
+            _send_json(self, {"ok": False, "category": "任务冲突",
+                              "detail": msg})
+            return
+        _send_json(self, {"ok": True, "run_id": run_id,
+                          "account_total": len(pairs)})
+
+    def _api_groupsign_start(self, data):
+        pairs, err = self._pairs_for_ids(data.get("account_ids"))
+        if err:
+            _send_json(self, err)
+            return
+        run_id, msg = groupsign.start(pairs)
+        if msg:
+            _send_json(self, {"ok": False, "category": "任务冲突",
+                              "detail": msg})
+            return
+        _send_json(self, {"ok": True, "run_id": run_id,
+                          "account_total": len(pairs)})
+
     def _api_auto_settings(self, data):
         gt = str(data.get("global_time", "")).strip()
         if gt and not (len(gt) == 5 and gt[2] == ":"):
@@ -1671,7 +1767,6 @@ class AppHandler(BaseHTTPRequestHandler):
                 "global_time": gt or None,
                 "notify_system": data.get("notify_system"),
                 "notify_dot": data.get("notify_dot"),
-                "daily_like": data.get("daily_like"),
                 "accounts": data.get("accounts"),
             })
             if "enabled" in data:
@@ -1856,8 +1951,11 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         url = str(data.get("url") or "").strip()
         text = str(data.get("text") or "").strip()
+        fid = data.get("fid")
+        name = str(data.get("name") or "").strip()
         try:
-            group, err = groupsign.add_group(account_id, url, text)
+            group, err = groupsign.add_group(
+                account_id, url, text, fid=fid, name=name)
         except Exception as exc:  # noqa: BLE001
             _send_json(self, {"ok": False,
                               "detail": "添加失败：{}: {}".format(
@@ -2097,31 +2195,6 @@ function growthLine(g){
   }
   return html;
 }
-function likeLine(l){
-  if(!l||l.status==='disabled'){return '';}
-  if(l.status==='success'){
-    return '<div class="hint" style="color:#0BA36B;font-weight:700;margin-top:6px">'+
-      '随机点赞：成功（'+escTxt(l.fname||'')+
-      (l.tid?' / tid '+l.tid:'')+'）</div>';
-  }
-  if(l.status==='done'){
-    return '<div class="hint" style="color:#0BA36B;font-weight:700;margin-top:6px">'+
-      '随机点赞：今天已经完成</div>';
-  }
-  /* error 由下面的「提醒」卡片统一展示，避免重复 */
-  return '';
-}
-function groupsignLine(g){
-  if(!g||g.status==='disabled'||g.status==='empty'){return '';}
-  var c=(g.status==='error'||g.failed>0)?'#E8930C':'#0BA36B';
-  if(g.status==='error'){
-    return '<div class="hint" style="color:'+c+';font-weight:700;margin-top:6px">'+
-      '吧群签到：这次没有完成</div>';
-  }
-  return '<div class="hint" style="color:'+c+';font-weight:700;margin-top:6px">'+
-    '吧群签到：共 '+g.total+' 个群，成功 '+g.sent+' / 跳过 '+g.skipped+
-    ' / 失败 '+g.failed+'</div>';
-}
 function warningsCard(list){
   if(!list||list.length===0){return '';}
   var html='<div class="card"><div class="title">提醒（'+list.length+'）</div>';
@@ -2160,8 +2233,6 @@ function renderSingle(s){
       '没成功，已改为逐个吧补签')+'</div>';
   }
   html+=growthLine(s.growth);
-  html+=likeLine(s.like);
-  html+=groupsignLine(s.groupsign);
   if(s.status==='done'){
     html+='<div style="display:flex;gap:10px;margin-top:14px">';
     html+='<div style="flex:1;text-align:center;background:rgba(11,163,107,.12);'+
@@ -2247,8 +2318,6 @@ function renderMulti(s){
           '没成功，已改为逐个吧补签')+'</div>';
       }
       html+=growthLine(a.growth);
-      html+=likeLine(a.like);
-      html+=groupsignLine(a.groupsign);
       if(a.status==='done'){
         html+='<div class="hint" style="margin-top:6px">补签成功 '+
           (a.forum_success||0)+' · 补签失败 '+(a.forum_failed||0)+'</div>';
@@ -2450,6 +2519,153 @@ function pollWp(){
 })();
 pollWp();
 setInterval(pollWp,1000);
+
+/* ---- 独立模块：随机点赞 ---- */
+function moduleStatus(a){
+  if(a.status==='done') return ['已完成','#0BA36B'];
+  if(a.status==='error') return ['失败/异常','#E5484D'];
+  if(a.status==='running') return ['进行中…','#2B5CE6'];
+  return ['等待中','#8A90A0'];
+}
+function moduleFailures(list,prefix){
+  var h='';
+  if(!list||!list.length){return h;}
+  var max=Math.min(list.length,20);
+  for(var i=0;i<max;i++){
+    var f=list[i];
+    h+='<div class="hint" style="border-top:1px solid rgba(127,127,127,.12);padding-top:6px;margin-top:6px">'+
+      '<b>'+escTxt((prefix||'')+(f.forum||f.account||''))+'</b><br>'+
+      escTxt(failLine(f))+
+      (adviceLine(f)?'<br>'+escTxt(adviceLine(f)):'')+
+      (codeLine(f)?'<br><span style="color:#8A90A0;font-size:12px">'+escTxt(codeLine(f))+'</span>':'')+
+      '</div>';
+  }
+  if(list.length>max){h+='<div class="hint">还有 '+(list.length-max)+' 条未显示</div>';}
+  return h;
+}
+function renderLikeState(s){
+  var btn=document.getElementById('like_btn');
+  var box=document.getElementById('like_state');
+  if(!btn||!box){return;}
+  if(!s||s.status==='idle'){
+    box.innerHTML='<div class="card"><div class="hint">点击「开始随机点赞」，'+
+      '会为每个关注的吧随机抽 1 个帖子点主楼赞；每个吧每天最多一次，'+
+      '全部完成后当天不再点。</div></div>';
+    btn.disabled=false; btn.textContent='开始随机点赞';
+    return;
+  }
+  var busy=(s.status==='starting'||s.status==='running');
+  btn.disabled=busy; btn.textContent=busy?'随机点赞进行中…':'开始随机点赞';
+  var html='<div class="card"><div class="title">随机点赞'+
+    (busy?'（进行中）':'（已完成）')+'</div>';
+  html+='<div class="hint">账号进度 '+(s.account_done||0)+' / '+
+    (s.account_total||0)+'</div>';
+  if(busy){html+='<div class="spinner" style="margin:12px 0 0"></div>';}
+  var accounts=s.accounts||[];
+  for(var i=0;i<accounts.length;i++){
+    var a=accounts[i], st=moduleStatus(a);
+    html+='<div style="border-top:1px solid rgba(127,127,127,.16);padding:10px 0">'+
+      '<div style="display:flex;justify-content:space-between">'+
+      '<b>'+escTxt(a.account_name)+
+      '<span style="color:#8A90A0;font-size:12px;font-weight:400"> BDUSS '+
+      escTxt(a.account_mask)+'</span></b>'+
+      '<span style="color:'+st[1]+';font-size:12px;font-weight:700">'+st[0]+'</span></div>'+
+      '<div class="hint">'+escTxt(a.step||'')+' · 已检查 '+(a.checked||0)+' / '+
+      (a.total||0)+' · 成功 '+(a.success||0)+' · 跳过 '+(a.skipped||0)+
+      ' · 失败 '+(a.failed||0)+'</div>'+
+      moduleFailures(a.failures)+
+      (a.error?'<div class="hint" style="color:#E5484D">'+escTxt(a.error.detail||'')+'</div>':'')+
+      '</div>';
+  }
+  html+='</div>';
+  box.innerHTML=html;
+}
+function pollLike(){
+  fetch('/api/like/state').then(function(r){return r.json();})
+  .then(function(j){if(j.ok){renderLikeState(j.state);}}).catch(function(){});
+}
+
+/* ---- 独立模块：吧群签到 ---- */
+function renderGsState(s){
+  var btn=document.getElementById('gs_btn');
+  var box=document.getElementById('gs_state');
+  if(!btn||!box){return;}
+  if(!s||s.status==='idle'){
+    box.innerHTML='<div class="card"><div class="hint">按「吧群签到设置」里的群发送'+
+      '自定义消息；每个群每天发送成功后不再发。失败可重试，每天最多 3 次。</div></div>';
+    btn.disabled=false; btn.textContent='开始吧群签到';
+    return;
+  }
+  var busy=(s.status==='starting'||s.status==='running');
+  btn.disabled=busy; btn.textContent=busy?'吧群签到进行中…':'开始吧群签到';
+  var html='<div class="card"><div class="title">吧群签到'+
+    (busy?'（进行中）':'（已完成）')+'</div>';
+  html+='<div class="hint">账号进度 '+(s.account_done||0)+' / '+
+    (s.account_total||0)+'</div>';
+  if(busy){html+='<div class="spinner" style="margin:12px 0 0"></div>';}
+  var accounts=s.accounts||[];
+  for(var i=0;i<accounts.length;i++){
+    var a=accounts[i], st=moduleStatus(a);
+    html+='<div style="border-top:1px solid rgba(127,127,127,.16);padding:10px 0">'+
+      '<div style="display:flex;justify-content:space-between">'+
+      '<b>'+escTxt(a.account_name)+
+      '<span style="color:#8A90A0;font-size:12px;font-weight:400"> BDUSS '+
+      escTxt(a.account_mask)+'</span></b>'+
+      '<span style="color:'+st[1]+';font-size:12px;font-weight:700">'+st[0]+'</span></div>'+
+      '<div class="hint">'+escTxt(a.step||'')+' · 共 '+(a.total||0)+
+      ' 个群 · 成功 '+(a.sent||0)+' · 跳过 '+(a.skipped||0)+
+      ' · 失败 '+(a.failed||0)+'</div>'+
+      moduleFailures(a.warnings)+
+      (a.error?'<div class="hint" style="color:#E5484D">'+escTxt(a.error.detail||'')+'</div>':'')+
+      '</div>';
+  }
+  html+='</div>';
+  box.innerHTML=html;
+}
+function pollGs(){
+  fetch('/api/groupsign/state').then(function(r){return r.json();})
+  .then(function(j){if(j.ok){renderGsState(j.state);}}).catch(function(){});
+}
+
+/* ---- 两个模块的启动按钮 ---- */
+function startModule(btn,box,endpoint,idleText){
+  var ids=[];
+  document.querySelectorAll('.acct_cb:checked').forEach(function(c){
+    var v=parseInt(c.value,10);
+    if(!isNaN(v)){ids.push(v);}
+  });
+  if(ids.length===0){
+    box.innerHTML='<div class="errorbox" style="display:block">'+
+      '请至少勾选一个账号</div>';
+    return;
+  }
+  btn.disabled=true; btn.textContent='正在启动…';
+  fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({account_ids:ids})})
+    .then(function(r){return r.json();}).then(function(j){
+    if(!j.ok){
+      box.innerHTML='<div class="errorbox" style="display:block">'+
+        escTxt((j.category?(j.category+'：'):'')+(j.detail||'启动失败'))+'</div>';
+      btn.disabled=false; btn.textContent=idleText;
+    }else{setTimeout(endpoint.indexOf('like')>=0?pollLike:pollGs,300);}
+  }).catch(function(e){
+    box.innerHTML='<div class="errorbox" style="display:block">请求失败：'+
+      escTxt(e)+'</div>';
+    btn.disabled=false; btn.textContent=idleText;
+  });
+}
+(function(){
+  var lb=document.getElementById('like_btn');
+  if(lb){lb.addEventListener('click',function(){
+    startModule(lb,document.getElementById('like_state'),
+      '/api/like/start','开始随机点赞');});}
+  var gb=document.getElementById('gs_btn');
+  if(gb){gb.addEventListener('click',function(){
+    startModule(gb,document.getElementById('gs_state'),
+      '/api/groupsign/start','开始吧群签到');});}
+})();
+pollLike(); pollGs();
+setInterval(pollLike,1500); setInterval(pollGs,1500);
 </script>
 """
 

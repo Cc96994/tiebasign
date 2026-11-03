@@ -165,9 +165,22 @@ def page_content_checks():
           "原因：" in main._JS_SIGN and "怎么办：" in main._JS_SIGN)
     check("签到页 JS 有提醒区（warnings）", "warningsCard" in main._JS_SIGN)
     check("签到页 JS 展示随机点赞", "随机点赞" in main._JS_SIGN)
-    auto_html = main._page_settings_auto()
-    check("自动签到页有「每日随机点赞」开关",
-          "id='daily_like'" in auto_html and "每日随机点赞" in auto_html)
+    import storage
+    _old_list = storage.list_accounts
+    _old_cur = storage.get_current_account
+    _fake_acct = {"id": 1, "name": "示例账号", "mask": "abCD****wxyz",
+                  "is_current": True}
+    storage.list_accounts = lambda: [dict(_fake_acct)]
+    storage.get_current_account = lambda: dict(_fake_acct)
+    try:
+        sign_html2 = main._page_sign()
+    finally:
+        storage.list_accounts = _old_list
+        storage.get_current_account = _old_cur
+    check("签到页有独立的随机点赞模块",
+          "id='like_btn'" in sign_html2 and "开始随机点赞" in sign_html2)
+    check("签到页有独立的吧群签到模块",
+          "id='gs_btn'" in sign_html2 and "开始吧群签到" in sign_html2)
     check("设置页有「吧群签到设置」入口",
           "/settings/groupsign" in main._page_settings())
     gs_html = main._page_settings_groupsign()
@@ -175,6 +188,8 @@ def page_content_checks():
           "吧群签到设置" in gs_html and "添加群" in gs_html, gs_html[:200])
     check("吧群签到页有自定义文案输入",
           "gs_text" in gs_html and "默认发送内容" in gs_html)
+    check("吧群签到页有手动填吧ID的兜底",
+          "gs_fid" in gs_html and "gs_name" in gs_html)
 
     # 更新页：按钮与文案
     set_state(phase="available",
@@ -290,10 +305,14 @@ def http_checks():
         status, body = post("/api/update/settings", {"auto_check": False})
         check("POST 设置成功", status == 200 and body["ok"] is True)
         check("设置真的生效了", updater.get_settings()["auto_check"] is False)
-        status, body = post("/api/auto/settings", {"daily_like": False})
-        check("每日随机点赞开关可保存",
-              status == 200 and body["ok"] is True
-              and body["settings"]["daily_like"] is False, body)
+        status, raw = get("/api/like/state")
+        body = json.loads(raw)
+        check("GET /api/like/state 200",
+              status == 200 and body["ok"] is True)
+        status, raw = get("/api/groupsign/state")
+        body = json.loads(raw)
+        check("GET /api/groupsign/state 200",
+              status == 200 and body["ok"] is True)
         status, body = post("/api/update/settings", {"download_mode": "bogus"})
         check("非法下载来源被拒（400）",
               status == 400 and body["ok"] is False, (status, body))
