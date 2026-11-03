@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """TiebaSign M2.2.2 - account module (webview bootstrap).
 
 Local HTTP UI on 127.0.0.1:5000. PRD pages:
@@ -515,8 +515,8 @@ def _page_sign():
         "<div class='btn-row' style='margin-top:12px'>"
         "<button class='btn btn-primary' id='gs_btn' type='button'>"
         "开始吧群签到</button>"
-        "<a class='btn btn-ghost' href='/settings/groupsign'>设置</a></div></div>"
-        "<div id='gs_state'></div>"
+        "<a class='btn btn-ghost' href='/settings/groupsign'>设置</a></div>"
+        "<div id='gs_state'></div></div>"
         "<div class='card'><div class='title'>一键水贴</div>"
         "<div class='hint'>立刻把勾选账号<b>今天还差几条</b>一次发完。比如设置"
         "每天 4 次，每个目标帖就补到 4 条；发完今天就不再自动发。<br>"
@@ -2619,9 +2619,7 @@ function renderGsState(s){
       confLine='<div class="hint" style="color:#E8930C">还没有配置任何群；'+
         '请先到「吧群签到设置」添加。</div>';
     }
-    box.innerHTML='<div class="card"><div class="hint">按「吧群签到设置」里的群发送'+
-      '自定义消息；每个群每天发送成功后不再发。失败可重试，每天最多 3 次。</div>'+
-      confLine+'</div>';
+    box.innerHTML=confLine;
     btn.disabled=false; btn.textContent='开始吧群签到';
     return;
   }
