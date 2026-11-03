@@ -6,9 +6,10 @@
 #   2. test_waterpost  自动水贴：链接 / 文案 / 每账号分组计划 / 手动一键水贴
 #   3. test_ui_update  界面接线：所有页面 × 四种更新状态渲染 + 真 HTTP 打接口
 #   4. test_signer     签到引擎：错误码表 / 并发上限 / 错误详情 / BDUSS 脱敏
-#   5. test_build_swap 构建脚本：spec 交换在"新克隆 / 构建失败"下不许丢原件、
+#   5. test_groupsign  吧群签到：每日一次 / 自定义文案 / 失败上限 / 群管理
+#   6. test_build_swap 构建脚本：spec 交换在"新克隆 / 构建失败"下不许丢原件、
 #                      也不许把换进去的 spec 留在树里
-#   6. check_p4a_base  底座可重建：净室重建 p4a 底座，断言 App 反射调用的每个
+#   7. check_p4a_base  底座可重建：净室重建 p4a 底座，断言 App 反射调用的每个
 #                      Java 方法都有定义（底座在仓库之外，最容易静默丢失）
 #
 # verify_release.sh 会调用本脚本 —— 发布前必须先过这一关。
@@ -27,7 +28,7 @@ if ! command -v "$PY" >/dev/null 2>&1; then
 fi
 
 fail=0
-for t in test_updater test_waterpost test_ui_update test_signer; do
+for t in test_updater test_waterpost test_ui_update test_signer test_groupsign; do
     echo "=================== $t ==================="
     if "$PY" "$PROJ/scripts/tests/$t.py"; then
         :

@@ -14,6 +14,7 @@ import html
 import json
 import os
 import sys
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -55,6 +56,9 @@ _import_marker("py:autosign")
 
 import waterpost  # noqa: E402
 _import_marker("py:waterpost")
+
+import groupsign  # noqa: E402
+_import_marker("py:groupsign")
 
 import updater  # noqa: E402
 _import_marker("py:updater")
@@ -578,6 +582,8 @@ def _page_settings():
         "<span>自动签到设置</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/waterpost'>"
         "<span>自动水贴设置</span><span class='arrow'>›</span></a>"
+        "<a class='menu-item' href='/settings/groupsign'>"
+        "<span>吧群签到设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
         "<div class='hint'>贴吧签到助手 0.5.0 · aiotieba 4.7.1<br>"
@@ -1183,6 +1189,151 @@ def _page_settings_waterpost():
     return _page("自动水贴设置", html_part + _JS_WATERPOST, "settings")
 
 
+def _page_settings_groupsign():
+    """吧群签到设置：每个账号配置自己的群 + 自定义发送内容。"""
+    st = groupsign.get_settings()
+    accounts = storage.list_accounts()
+    gmap = {a["account_id"]: a["groups"] for a in st["accounts"]}
+    today = time.strftime("%Y-%m-%d")
+    default_text = st.get("text") or ""
+
+    cards = []
+    for acct in accounts:
+        aid = acct["id"]
+        rows = []
+        for group in gmap.get(aid, []):
+            cid = group["chatroom_id"]
+            last = group.get("last") or {}
+            if last.get("date") == today and last.get("ok"):
+                status = "<span style='color:#0BA36B'>今天已发送成功，不会重复发送</span>"
+            elif last.get("date") == today and last.get("attempts"):
+                status = ("<span style='color:#E8930C'>今天已尝试 {} 次，还没成功</span>"
+                          ).format(last.get("attempts"))
+            else:
+                status = "<span style='color:#8A90A0'>今天还没发送</span>"
+            detail = last.get("detail") or ""
+            rows.append(
+                "<div class='card'>"
+                "<div class='title'>{} "
+                "<span class='hint'>{} · chatroom_id {}</span></div>"
+                "<div class='form'><label>发送内容</label>"
+                "<input class='input' id='gs_text_{}_{}' value='{}' "
+                "placeholder='{}'></div>"
+                "<div class='btn-row'>"
+                "<button class='btn btn-primary' type='button' "
+                "onclick='gsSaveText({},{})'>保存内容</button>"
+                "<button class='btn btn-ghost' type='button' "
+                "onclick='gsDelete(this,{},{})'>删除群</button></div>"
+                "<div class='hint'>{} {}</div></div>".format(
+                    html.escape(group.get("name") or "吧群"),
+                    html.escape(group.get("forum_name") or ""),
+                    cid, aid, cid,
+                    html.escape(group.get("text") or "", quote=True),
+                    html.escape(default_text, quote=True),
+                    aid, cid, aid, cid,
+                    status, html.escape(detail)))
+        if not rows:
+            rows.append("<div class='hint'>这个账号还没有配置群。"
+                        "把群分享链接粘到下面即可添加。</div>")
+        cards.append(
+            "<div class='card'><div class='title'>{} "
+            "<span class='hint'>BDUSS {}</span></div>{}</div>"
+            "<div class='card'><div class='title'>给这个账号添加群</div>"
+            "<div class='form'><label>群分享链接</label>"
+            "<input class='input' id='gs_url_{}' "
+            "placeholder='https://tieba.baidu.com/mo/q/wise-main-share/"
+            "chatShare?chatroom_id=...'></div>"
+            "<div class='form'><label>发送内容（留空用上面的默认内容）</label>"
+            "<input class='input' id='gs_newtext_{}' placeholder='{}'></div>"
+            "<button class='btn btn-primary' type='button' "
+            "onclick='gsAdd({})'>添加群</button>"
+            "<div class='errorbox' id='gs_err_{}'></div></div>".format(
+                html.escape(acct.get("name") or "贴吧账号"),
+                html.escape(acct.get("mask") or ""),
+                "".join(rows), aid, aid, html.escape(default_text, quote=True),
+                aid, aid))
+
+    if not cards:
+        cards.append("<div class='empty'><p>还没有账号</p>"
+                     "<p>先到「账号」页添加百度账号，再回来配置吧群签到。</p></div>")
+
+    body = (
+        "<div class='topbar'>吧群签到设置</div><main>"
+        "<div class='card'><div class='title'>说明</div>"
+        "<div class='hint'>吧群签到 = 在指定群里发一句话（例如"
+        "「@群助手/领取今日福利」），由群里的机器人完成签到/领福利。<br>"
+        "每个账号只发自己配置的群；<b>每个群每天发送成功后就不再发</b>，"
+        "失败可以重试，但每天最多 3 次。发送失败不会影响吧签到。</div></div>"
+        "<div class='card'><div class='title'>开关与默认内容</div>"
+        "<label class='menu-item'><span>启用吧群签到</span>"
+        "<input type='checkbox' id='gs_enabled'{}></label>"
+        "<div class='form'><label>默认发送内容</label>"
+        "<input class='input' id='gs_text' value='{}'></div>"
+        "<button class='btn btn-primary' type='button' "
+        "onclick='gsSaveSettings()'>保存</button>"
+        "<div class='errorbox' id='gs_err_settings'></div></div>"
+        "{}"
+        "</main>"
+        "<div id='toast' style='display:none;position:fixed;left:50%;"
+        "bottom:86px;transform:translateX(-50%);background:#141821;color:#fff;"
+        "border-radius:999px;padding:12px 22px;font-size:14px;max-width:84%;"
+        "z-index:60'></div>"
+    ).format(
+        " checked" if st.get("enabled") else "",
+        html.escape(default_text, quote=True),
+        "".join(cards))
+
+    script = """
+<script>
+function gsToast(msg){var t=document.getElementById('toast');
+t.textContent=msg;t.style.display='block';
+setTimeout(function(){t.style.display='none';},3500);}
+function gsErr(id,msg){var e=document.getElementById(id);
+if(!e){gsToast(msg);return;} e.style.display='block';e.textContent=msg;}
+function gsOk(id){var e=document.getElementById(id);if(e){e.style.display='none';}}
+function gsPost(path,body){return fetch(path,{method:'POST',
+headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+.then(function(r){return r.json();});}
+function gsSaveSettings(){
+var payload={enabled:document.getElementById('gs_enabled').checked,
+text:document.getElementById('gs_text').value};
+gsPost('/api/groupsign/settings',payload).then(function(j){
+if(j.ok){gsToast('设置已保存');setTimeout(function(){location.reload();},500);}
+else{gsErr('gs_err_settings',j.detail||'保存失败');}})
+.catch(function(e){gsErr('gs_err_settings','请求失败：'+e);});
+}
+function gsAdd(aid){
+var url=document.getElementById('gs_url_'+aid).value.trim();
+var text=document.getElementById('gs_newtext_'+aid).value.trim();
+if(!url){gsErr('gs_err_'+aid,'请先粘贴群分享链接');return;}
+gsPost('/api/groupsign/groups',{account_id:aid,url:url,text:text})
+.then(function(j){if(j.ok){gsToast('已添加群');setTimeout(function()
+{location.reload();},500);}else{gsErr('gs_err_'+aid,j.detail||'添加失败');}})
+.catch(function(e){gsErr('gs_err_'+aid,'请求失败：'+e);});
+}
+function gsSaveText(aid,cid){
+var el=document.getElementById('gs_text_'+aid+'_'+cid);
+var text=el?el.value.trim():'';
+gsPost('/api/groupsign/groups/'+aid+'/'+cid+'/text',{text:text})
+.then(function(j){if(j.ok){gsToast('发送内容已保存');}
+else{gsToast(j.detail||'保存失败');}})
+.catch(function(e){gsToast('请求失败：'+e);});
+}
+function gsDelete(btn,aid,cid){
+if(btn.getAttribute('data-armed')!=='1'){
+btn.setAttribute('data-armed','1');btn.textContent='再点一次删除';
+setTimeout(function(){btn.removeAttribute('data-armed');
+btn.textContent='删除群';},3000);return;}
+gsPost('/api/groupsign/groups/'+aid+'/'+cid+'/delete',{})
+.then(function(j){if(j.ok){gsToast('已删除');setTimeout(function()
+{location.reload();},400);}else{gsToast(j.detail||'删除失败');}})
+.catch(function(e){gsToast('请求失败：'+e);});
+}
+</script>
+"""
+    return _page("吧群签到设置", body + script, "settings")
+
+
 def _page_weblogin():
     body = """
 <div class='topbar'>百度账号网页登录</div>
@@ -1304,6 +1455,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 _send_html(self, _page_settings_auto())
             elif path == "/settings/waterpost":
                 _send_html(self, _page_settings_waterpost())
+            elif path == "/settings/groupsign":
+                _send_html(self, _page_settings_groupsign())
             elif path == "/settings/update":
                 # 进入这一页就算看过了：红点清掉（与签到页同样的约定）。
                 # 没查到东西时这里本来也没红点，所以清不清都一样。
@@ -1398,6 +1551,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._api_waterpost_test(data)
             elif path == "/api/waterpost/texts/reset":
                 self._api_waterpost_texts_reset()
+            elif path == "/api/groupsign/settings":
+                self._api_groupsign_settings(data)
+            elif path == "/api/groupsign/groups":
+                self._api_groupsign_add(data)
+            elif path.startswith("/api/groupsign/groups/"):
+                self._api_groupsign_group_action(path, data)
             elif path == "/api/update/settings":
                 self._api_update_settings(data)
             elif path == "/api/update/check":
@@ -1670,6 +1829,76 @@ class AppHandler(BaseHTTPRequestHandler):
     def _api_waterpost_texts_reset(self):
         _send_json(self, {"ok": True, "texts": waterpost.default_texts()})
 
+    # ---- 吧群签到 -----------------------------------------------------
+
+    def _api_groupsign_settings(self, data):
+        try:
+            payload = {}
+            if "enabled" in data:
+                payload["enabled"] = data.get("enabled")
+            if "text" in data:
+                payload["text"] = data.get("text")
+            settings = groupsign.save_settings(payload)
+        except ValueError as exc:
+            _send_json(self, {"ok": False, "detail": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            _send_json(self, {"ok": False, "detail": "保存失败：{}".format(exc)})
+            return
+        _send_json(self, {"ok": True, "settings": settings})
+
+    def _api_groupsign_add(self, data):
+        raw_account = data.get("account_id")
+        try:
+            account_id = int(raw_account)
+        except (TypeError, ValueError):
+            _send_json(self, {"ok": False, "detail": "账号选择无效"})
+            return
+        url = str(data.get("url") or "").strip()
+        text = str(data.get("text") or "").strip()
+        try:
+            group, err = groupsign.add_group(account_id, url, text)
+        except Exception as exc:  # noqa: BLE001
+            _send_json(self, {"ok": False,
+                              "detail": "添加失败：{}: {}".format(
+                                  type(exc).__name__, exc)})
+            return
+        if err:
+            _send_json(self, {"ok": False, "detail": err})
+            return
+        _send_json(self, {"ok": True, "group": group})
+
+    def _api_groupsign_group_action(self, path, data):
+        parts = [p for p in path.split("/") if p]
+        # /api/groupsign/groups/<account_id>/<chatroom_id>/<action>
+        if len(parts) != 6:
+            _send_json(self, {"ok": False, "detail": "bad route"}, 404)
+            return
+        try:
+            account_id = int(parts[3])
+            chatroom_id = int(parts[4])
+        except ValueError:
+            _send_json(self, {"ok": False, "detail": "bad id"}, 400)
+            return
+        action = parts[5]
+        if action == "delete":
+            ok = groupsign.delete_group(account_id, chatroom_id)
+            _send_json(self, {"ok": bool(ok),
+                              "detail": None if ok else "群不存在"})
+            return
+        if action == "text":
+            try:
+                group, err = groupsign.update_group_text(
+                    account_id, chatroom_id, data.get("text"))
+            except Exception as exc:  # noqa: BLE001
+                _send_json(self, {"ok": False,
+                                  "detail": "保存失败：{}".format(exc)})
+                return
+            _send_json(self, {"ok": bool(group), "group": group,
+                              "detail": err})
+            return
+        _send_json(self, {"ok": False, "detail": "unknown action"}, 404)
+
     # ---- 检查更新 -----------------------------------------------------
     # 四个接口都是"起一个后台线程就返回"，界面靠 /api/update/state 轮询。
     # 检查/下载动辄几秒到几分钟，同步等会把 WebView 的请求卡死。
@@ -1882,6 +2111,17 @@ function likeLine(l){
   /* error 由下面的「提醒」卡片统一展示，避免重复 */
   return '';
 }
+function groupsignLine(g){
+  if(!g||g.status==='disabled'||g.status==='empty'){return '';}
+  var c=(g.status==='error'||g.failed>0)?'#E8930C':'#0BA36B';
+  if(g.status==='error'){
+    return '<div class="hint" style="color:'+c+';font-weight:700;margin-top:6px">'+
+      '吧群签到：这次没有完成</div>';
+  }
+  return '<div class="hint" style="color:'+c+';font-weight:700;margin-top:6px">'+
+    '吧群签到：共 '+g.total+' 个群，成功 '+g.sent+' / 跳过 '+g.skipped+
+    ' / 失败 '+g.failed+'</div>';
+}
 function warningsCard(list){
   if(!list||list.length===0){return '';}
   var html='<div class="card"><div class="title">提醒（'+list.length+'）</div>';
@@ -1921,6 +2161,7 @@ function renderSingle(s){
   }
   html+=growthLine(s.growth);
   html+=likeLine(s.like);
+  html+=groupsignLine(s.groupsign);
   if(s.status==='done'){
     html+='<div style="display:flex;gap:10px;margin-top:14px">';
     html+='<div style="flex:1;text-align:center;background:rgba(11,163,107,.12);'+
@@ -2007,6 +2248,7 @@ function renderMulti(s){
       }
       html+=growthLine(a.growth);
       html+=likeLine(a.like);
+      html+=groupsignLine(a.groupsign);
       if(a.status==='done'){
         html+='<div class="hint" style="margin-top:6px">补签成功 '+
           (a.forum_success||0)+' · 补签失败 '+(a.forum_failed||0)+'</div>';

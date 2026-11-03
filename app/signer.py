@@ -106,6 +106,7 @@ def _new_state(run_id, account):
         "msign": None,          # {"status","category","code","reason","detail"}
         "growth": None,         # 成长等级签到（4.7.1 的 sign_growth）结果
         "like": None,           # 每日随机点赞结果
+        "groupsign": None,      # 吧群签到（在群里发自定义消息）结果
         "forum_total": 0,       # forums that still needed signing
         "forum_checked": 0,
         "forum_success": 0,
@@ -507,7 +508,31 @@ async def _sign_async(state, bduss):
                 _update_in(state, like={"status": "error",
                                         "category": _classify_exception(exc),
                                         "code": None, "reason": None,
-                                        "detail": detail})
+                                        "advice": "稍后再试",
+                                        "detail": detail, "raw": detail})
+
+            # ---- 6. 吧群签到（在群里发自定义消息） ---------------------
+            try:
+                import groupsign
+                gs = await groupsign.run_account_async(
+                    client,
+                    {"id": state.get("account_id"),
+                     "name": state.get("account_name"),
+                     "mask": state.get("account_mask")},
+                    secret)
+                _update_in(state, groupsign=gs)
+                for warn in gs.get("warnings") or []:
+                    state["warnings"].append(warn)
+                if gs.get("status") == "done":
+                    _log("groupsign sent={} skipped={} failed={}".format(
+                        gs.get("sent"), gs.get("skipped"),
+                        gs.get("failed")), secret)
+            except Exception as exc:  # noqa: BLE001 - 群签到不能拖累吧签到
+                detail = "群签到过程中出现了异常，这次没有完成"
+                _update_in(state, groupsign={
+                    "status": "error", "sent": 0, "skipped": 0,
+                    "failed": 1, "total": 0, "details": [],
+                    "warnings": [], "detail": detail})
 
             _update_in(state, status="done", step="签到完成",
                        finished_at=_now_ms())
@@ -569,6 +594,7 @@ def _snapshot_for_report(state):
                 "msign": sub.get("msign"),
                 "growth": sub.get("growth"),
                 "like": sub.get("like"),
+                "groupsign": sub.get("groupsign"),
                 "forum_total": sub.get("forum_total"),
                 "forum_checked": sub.get("forum_checked"),
                 "forum_success": sub.get("forum_success"),
@@ -588,6 +614,7 @@ def _snapshot_for_report(state):
             "msign": state.get("msign"),
             "growth": state.get("growth"),
             "like": state.get("like"),
+            "groupsign": state.get("groupsign"),
             "forum_total": state.get("forum_total"),
             "forum_checked": state.get("forum_checked"),
             "forum_success": state.get("forum_success"),
@@ -674,6 +701,22 @@ def _fmt_like(like):
         like.get("detail") or "百度没有给出具体原因")
 
 
+def _fmt_groupsign(gs):
+    if not gs:
+        return None
+    status = gs.get("status")
+    if status in ("disabled", "empty"):
+        return None
+    total = gs.get("total") or 0
+    sent = gs.get("sent") or 0
+    failed = gs.get("failed") or 0
+    skipped = gs.get("skipped") or 0
+    if status == "error":
+        return "吧群签到：这次没有完成"
+    return "吧群签到：共 {} 个群，成功 {} / 跳过 {} / 失败 {}".format(
+        total, sent, skipped, failed)
+
+
 def _report_lines_for_account(label, acct):
     lines = []
     name = acct.get("account_name") or "贴吧账号"
@@ -686,6 +729,9 @@ def _report_lines_for_account(label, acct):
     like = _fmt_like(acct.get("like"))
     if like:
         lines.append("  " + like)
+    gs = _fmt_groupsign(acct.get("groupsign"))
+    if gs:
+        lines.append("  " + gs)
     msign = _fmt_msign(acct.get("msign"))
     if msign:
         lines.append("  " + msign)

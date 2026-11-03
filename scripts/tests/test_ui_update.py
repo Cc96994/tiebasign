@@ -168,6 +168,13 @@ def page_content_checks():
     auto_html = main._page_settings_auto()
     check("自动签到页有「每日随机点赞」开关",
           "id='daily_like'" in auto_html and "每日随机点赞" in auto_html)
+    check("设置页有「吧群签到设置」入口",
+          "/settings/groupsign" in main._page_settings())
+    gs_html = main._page_settings_groupsign()
+    check("吧群签到页能渲染",
+          "吧群签到设置" in gs_html and "添加群" in gs_html, gs_html[:200])
+    check("吧群签到页有自定义文案输入",
+          "gs_text" in gs_html and "默认发送内容" in gs_html)
 
     # 更新页：按钮与文案
     set_state(phase="available",
@@ -264,6 +271,13 @@ def http_checks():
         status, body = get("/sign/report")
         check("GET /sign/report 200 且是完整页面",
               status == 200 and "复制报告" in body and "</html>" in body)
+        status, body = get("/settings/groupsign")
+        check("GET /settings/groupsign 200 且是完整页面",
+              status == 200 and "吧群签到" in body and "</html>" in body)
+        status, body = post("/api/groupsign/settings", {"enabled": False})
+        check("吧群签到开关可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["enabled"] is False, body)
         status, body = get("/api/update/state")
         state = json.loads(body)["state"]
         check("GET /api/update/state 200",
