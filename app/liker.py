@@ -30,8 +30,8 @@ import tieba_codes
 
 _DATA_FILENAME = "tiebasign_like.json"
 _MAX_FORUM_PAGES = 25
-_LIKE_CONCURRENCY = 1
-_LIKE_DELAY = (2.0, 3.5)
+_LIKE_CONCURRENCY = 3
+_LIKE_DELAY = (0.8, 1.2)
 _LIKE_RETRIES = 2
 _RL_CODE = 3280004
 _RN = 30
@@ -319,7 +319,7 @@ async def _agree_with_retry(client, tid):
         if tieba_codes.parse_code(getattr(err, "code", None)) != _RL_CODE \
                 or attempt >= _LIKE_RETRIES:
             return resp, err
-        await asyncio.sleep(10 if attempt == 0 else 25)
+        await asyncio.sleep(5 if attempt == 0 else 12)
     return None, last_err
 
 

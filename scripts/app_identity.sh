@@ -36,17 +36,17 @@ APP_KEY_ALIAS="${APP_KEY_ALIAS:-tiebasign}"
 # This is the one and only key that may sign a release for existing users.
 APP_KEYSTORE_NAME="${APP_KEYSTORE_NAME:-tiebasign-release.keystore}"
 
-# ---- immutable facts about the PUBLISHED v0.4.0 (GitHub release V0.4.0) ----
+# ---- immutable facts about the PUBLISHED v0.5.3 (GitHub release V0.5.3) ----
 # This version is "the next version of the same app": applicationId and signer
 # must match, versionCode must not go backwards, or Android refuses the
 # in-place upgrade (the user would have to uninstall = lose their sign-in data).
 # Measured on the published asset, not from memory. Enforced by
 # scripts/check_upgrade_compat.sh before every release.
-APP_PREV_VERSION="0.4.0"
-APP_PREV_VERSION_CODE="${APP_PREV_VERSION_CODE:-1023400}"
+APP_PREV_VERSION="0.5.3"
+APP_PREV_VERSION_CODE="${APP_PREV_VERSION_CODE:-1023503}"
 APP_PREV_SIGNER_SHA256="${APP_PREV_SIGNER_SHA256:-84d7ed804fb7d2124cf51a083fb566286be0f381b83fe5689b667a2d3d6e0a7b}"
-# sha256 of the published APK file itself (release/tieba-sign-assistant-0.4.0-arm64-v8a-release.apk)
-APP_PREV_APK_SHA256="${APP_PREV_APK_SHA256:-3c300ce472d1048589caa221923874001adcf2202249136c2747e840a247cdfe}"
+# sha256 of the published APK file itself (release/tieba-sign-assistant-0.5.3-arm64-v8a-release.apk)
+APP_PREV_APK_SHA256="${APP_PREV_APK_SHA256:-97a00c3f7a1fa7ef9827a3affbc7b1f91387c4d5c275990ea0a8e4a0057db8b1}"
 
 export APP_SPEC APP_TITLE APP_DOMAIN APP_NAME APP_VERSION APP_PACKAGE \
        APP_SERVICE_CLASS APP_KEY_ALIAS APP_KEYSTORE_NAME \

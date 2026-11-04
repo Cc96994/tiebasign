@@ -51,8 +51,8 @@ _SCHEMA = 1
 # ---- 当前 App 的身份（这两行是"同一个事实的第二份拷贝"，由 verify_release.sh
 #      强制校验：versionCode 必须等于 APK 实测值，version 必须等于 spec 的
 #      version / main.py 里用户看得见的那串。改版本号时三处一起改。）--------
-_APP_VERSION = "0.5.3"
-_APP_VERSION_CODE = 1023503
+_APP_VERSION = "0.5.5"
+_APP_VERSION_CODE = 1023505
 _PACKAGE = "org.dsh.tiebaweb"
 # 只允许这个签名密钥签出来的包被装上去（与 scripts/app_identity.sh 的
 # APP_PREV_SIGNER_SHA256 是同一个值）。
@@ -122,6 +122,46 @@ def _data_path():
         os.environ.get("ANDROID_PRIVATE") or os.getcwd(), _DATA_FILENAME)
 
 
+def _prune_stale(data):
+    """App 已经升到当前版本后，清掉上一版留下的「已下载/待安装」。
+
+    升级是通过系统安装器完成并让 App 重启的；json 里的 downloaded 仍指向
+    刚装上的那个旧包，设置页就会一直显示「vX 已下载，待安装」。这里在
+    加载时发现 downloaded.version_code <= 当前版本就把它删掉/清空。
+    """
+    dl = data.get("downloaded")
+    if isinstance(dl, dict):
+        try:
+            code = int(dl.get("version_code") or 0)
+        except (TypeError, ValueError):
+            code = 0
+        path = dl.get("path") or ""
+        if (code and code <= _APP_VERSION_CODE) or (
+                path and not os.path.isfile(path)):
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            data["downloaded"] = None
+            if data.get("phase") in ("ready", "downloading"):
+                data["phase"] = "idle"
+                data["detail"] = "已更新到 v{}".format(_APP_VERSION)
+            data["dot"] = False
+    latest = data.get("latest")
+    if isinstance(latest, dict):
+        try:
+            lcode = int(latest.get("version_code") or 0)
+        except (TypeError, ValueError):
+            lcode = 0
+        if lcode and lcode <= _APP_VERSION_CODE:
+            data["latest"] = None
+            if data.get("phase") == "available":
+                data["phase"] = "idle"
+            data["dot"] = False
+    return data
+
+
 def _load():
     global _cache
     if _cache is not None:
@@ -142,6 +182,7 @@ def _load():
         merged["version"] = _SCHEMA
     if merged.get("download_mode") not in ("auto", "github", "gitee"):
         merged["download_mode"] = "auto"
+    merged = _prune_stale(merged)
     _cache = merged
     return _cache
 

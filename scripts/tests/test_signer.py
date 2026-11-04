@@ -411,6 +411,50 @@ def test_growth_step():
     check("成长签到成功 -> success", state3["growth"]["status"] == "success")
 
 
+def test_auto_modules():
+    """自动吧群签到/随机点赞由 autosign 调度，各模块有开关/时间。"""
+    import autosign
+    import groupsign
+    import liker
+
+    autosign._cache = None
+    data = autosign._load()
+    data["global_time"] = "08:00"
+    data["auto_groupsign"] = True
+    data["auto_like"] = True
+    data["groupsign_time"] = ""
+    data["like_time"] = ""
+    data["module_runs"] = {}
+    autosign._save(data)
+
+    calls = []
+    old_pairs = autosign._all_pairs
+    old_g = groupsign.start
+    old_l = liker.start
+    autosign._all_pairs = lambda: [({"id": 1, "name": "A", "mask": "a"},
+                                    "fake-bduss")]
+    groupsign.start = lambda pairs: (calls.append("groupsign"), (1, None))[1]
+    liker.start = lambda pairs: (calls.append("like"), (1, None))[1]
+    try:
+        autosign._run_auto_modules(autosign._load(), "2026-11-05", "08:00")
+        check("自动模块：吧群签到和随机点赞都在时间到后启动",
+              calls == ["groupsign", "like"], calls)
+        calls[:] = []
+        autosign._run_auto_modules(autosign._load(), "2026-11-05", "08:01")
+        check("自动模块：当天第二次不再重复启动", calls == [], calls)
+        calls[:] = []
+        fresh = autosign._load()
+        fresh["auto_groupsign"] = False
+        fresh["module_runs"] = {}
+        autosign._save(fresh)
+        autosign._run_auto_modules(autosign._load(), "2026-11-05", "08:00")
+        check("自动模块：关闭开关后只跑随机点赞", calls == ["like"], calls)
+    finally:
+        autosign._all_pairs = old_pairs
+        groupsign.start = old_g
+        liker.start = old_l
+
+
 def test_autosign_warning_not_failure():
     """msign 失败只进 warnings；所有吧签到成功时不能判失败/弹通知。"""
     import autosign
@@ -470,6 +514,7 @@ def main():
     print("== 网络分类 =="); test_network_error_category()
     print("== 成长等级签到 =="); test_growth_step()
     print("== 自动签到 warnings =="); test_autosign_warning_not_failure()
+    print("== 自动模块 =="); test_auto_modules()
     print()
     print("{} checks, {} failed".format(TOTAL[0], len(FAILS)))
     if FAILS:
