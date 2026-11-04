@@ -1,10 +1,10 @@
-# 上传 GitHub / Gitee 准备清单
+﻿# 上传 GitHub / Gitee 准备清单
 
 仓库：
 
 | 平台 | 地址 | 现状 |
 |---|---|---|
-| GitHub | https://github.com/Cc96994/tiebasign | 有 V0.3.0 / V0.4.0 Release；源码已同步（0.5.5 待发布） |
+| GitHub | https://github.com/Cc96994/tiebasign | 有 V0.3.0 / V0.4.0 / V0.5.3 Release；源码已同步（0.5.5 待发布） |
 | Gitee | https://gitee.com/Cc96994/tiebasign | 有仓库；**还没有任何发行版** |
 
 APK 走 Releases 发布，**不要 push 进 git**。

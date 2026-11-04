@@ -15,8 +15,8 @@
 - 安全：BDUSS 只用 Android Keystore AES-GCM 加密存本机，任何页面不显示完整 BDUSS；日志/报告统一脱敏；不保存明文密码、无签到历史、无跨设备恢复（历史泄漏审计见 `docs/SECURITY_AUDIT_0.5.5.md`）
 
 ## 版本与下载
-- **线上正式版：0.4.0**（arm64-v8a，minSdk 23 / Android 8.0+，targetSdk 34）——
-  安装包在 **GitHub Releases** 下载：`tieba-sign-assistant-0.4.0-arm64-v8a-release.apk`（附 `update.json` / `SHA256SUMS`）
+- **线上正式版：0.5.3**（arm64-v8a，minSdk 23 / Android 8.0+，targetSdk 34）——
+  安装包在 **GitHub Releases** 下载：`tieba-sign-assistant-0.5.3-arm64-v8a-release.apk`（附 `update.json` / `SHA256SUMS`）
 - **0.5.5 源码已完成，待构建与发布**：版本号已同步到 spec / 界面 / updater 三处
   （versionCode 1023505）。构建后按 `GITHUB_PREP.md` 把 APK + `update.json` + `SHA256SUMS`
   三个文件一起挂到同一个 tag 下（`update.json` 是 App 判断版本与校验的关键，见下文）
