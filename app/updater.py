@@ -51,8 +51,8 @@ _SCHEMA = 1
 # ---- 当前 App 的身份（这两行是"同一个事实的第二份拷贝"，由 verify_release.sh
 #      强制校验：versionCode 必须等于 APK 实测值，version 必须等于 spec 的
 #      version / main.py 里用户看得见的那串。改版本号时三处一起改。）--------
-_APP_VERSION = "0.5.5"
-_APP_VERSION_CODE = 1023505
+_APP_VERSION = "0.5.6"
+_APP_VERSION_CODE = 1023506
 _PACKAGE = "org.dsh.tiebaweb"
 # 只允许这个签名密钥签出来的包被装上去（与 scripts/app_identity.sh 的
 # APP_PREV_SIGNER_SHA256 是同一个值）。

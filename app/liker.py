@@ -30,8 +30,8 @@ import tieba_codes
 
 _DATA_FILENAME = "tiebasign_like.json"
 _MAX_FORUM_PAGES = 25
-_LIKE_CONCURRENCY = 3
-_LIKE_DELAY = (0.8, 1.2)
+_LIKE_CONCURRENCY = 5
+_LIKE_DELAY = (0.25, 0.5)
 _LIKE_RETRIES = 2
 _RL_CODE = 3280004
 _RN = 30
