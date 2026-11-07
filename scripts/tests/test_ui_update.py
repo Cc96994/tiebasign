@@ -37,6 +37,7 @@ sys.modules["jnius"].JavaMethod = lambda *a, **k: None
 
 import updater  # noqa: E402
 import main  # noqa: E402
+import autosign  # noqa: E402
 
 FAILS = []
 
@@ -83,18 +84,18 @@ def render_all():
 
     states = (
         ("空闲", {}),
-        ("发现新版本", {"phase": "available", "dot": True, "detail": "发现 v0.5.4",
-                   "latest": {"version": "0.5.4", "version_code": 1023504,
-                              "tag": "v0.5.4", "source": "github",
+        ("发现新版本", {"phase": "available", "dot": True, "detail": "发现 v0.5.7",
+                   "latest": {"version": "0.5.7", "version_code": 1023507,
+                              "tag": "v0.5.7", "source": "github",
                               "source_label": "GitHub", "apk_name": "a.apk",
                               "sha256": "ab" * 32, "size": 20670000,
                               "notes": "说明", "found_at": "2026-10-16 00:00:00"}}),
         ("已下载", {"phase": "ready", "dot": True, "detail": "已下载并通过校验",
                  "downloaded": {"path": "/data/x.apk", "name": "a.apk",
                                 "sha256": "cd" * 32, "size": 20670000,
-                                "version": "0.5.4", "version_code": 1023504,
+                                "version": "0.5.7", "version_code": 1023507,
                                 "source": "gitee", "ts": "2026-10-16 00:00:00"},
-                 "latest": {"version": "0.5.4", "version_code": 1023504,
+                 "latest": {"version": "0.5.7", "version_code": 1023507,
                             "source_label": "Gitee"}}),
         ("出错且各源都有报告", {"phase": "error", "detail": "网络不可达",
                         "reports": [{"source": "github", "label": "GitHub",
@@ -106,7 +107,7 @@ def render_all():
                                      "status": "ok", "tag": "V0.2.0",
                                      "releases": 3}],
                         "history": [{"ts": "2026-10-16 00:00:00",
-                                     "summary": "查到 v0.5.4"}]}),
+                                     "summary": "查到 v0.5.7"}]}),
     )
     for label, kw in states:
         set_state(**kw)
@@ -130,16 +131,20 @@ def page_content_checks():
     check("设置页有「检查更新」入口", "/settings/update" in settings_html)
     check("设置页空闲时子标题就是「检查更新」",
           "检查更新" in settings_html and "发现 v" not in settings_html)
+    auto_html = main._page_settings_auto()
+    check("自动签到页引导到模块自己的设置页",
+          "/settings/groupsign" in auto_html and
+          "/settings/like" in auto_html)
 
     set_state(phase="available", dot=True,
-              latest={"version": "0.5.4", "version_code": 1023504})
+              latest={"version": "0.5.7", "version_code": 1023507})
     check("设置页发现新版本时显示版本号",
-          "检查更新 · 发现 v0.5.4" in main._page_settings())
+          "检查更新 · 发现 v0.5.7" in main._page_settings())
 
     set_state(phase="ready", dot=True,
-              downloaded={"version": "0.5.4", "path": "/x.apk"})
+              downloaded={"version": "0.5.7", "path": "/x.apk"})
     check("设置页已下载时显示待安装",
-          "v0.5.4 已下载，待安装" in main._page_settings())
+          "v0.5.7 已下载，待安装" in main._page_settings())
 
     # 红点：只在设置页那个 tab 上，且只在真的查到东西时
     set_state(dot=True)
@@ -151,7 +156,7 @@ def page_content_checks():
     check("_update_dot() 读不到状态时不抛异常",
           main._update_dot() in (True, False))
 
-    # v0.5.4：签到页要有报告入口，报告页要能渲染（失败详情导出）
+    # v0.5.7：签到页要有报告入口，报告页要能渲染（失败详情导出）
     sign_html = main._page_sign()
     check("签到页有「查看签到报告」入口", "/sign/report" in sign_html)
     report_html = main._page_sign_report()
@@ -195,7 +200,7 @@ def page_content_checks():
 
     # 更新页：按钮与文案
     set_state(phase="available",
-              latest={"version": "0.5.4", "version_code": 1023504})
+              latest={"version": "0.5.7", "version_code": 1023507})
     page = main._page_settings_update()
     check("更新页有「立即检查」按钮", "id='up_check'" in page and "立即检查" in page)
     check("更新页有「下载更新」按钮", "id='up_download'" in page)
@@ -209,7 +214,7 @@ def page_content_checks():
 
     set_state(phase="ready",
               downloaded={"path": "/data/app/update/a.apk", "size": 20670000,
-                          "sha256": "cd" * 32, "version": "0.5.4"})
+                          "sha256": "cd" * 32, "version": "0.5.7"})
     page = main._page_settings_update()
     check("已下载时更新页给出「立即安装」按钮", "id='up_install'" in page)
     check("已下载时更新页显示体积（19.7 MB）",
@@ -291,10 +296,24 @@ def http_checks():
         status, body = get("/settings/groupsign")
         check("GET /settings/groupsign 200 且是完整页面",
               status == 200 and "吧群签到" in body and "</html>" in body)
-        status, body = post("/api/groupsign/settings", {"enabled": False})
-        check("吧群签到开关可保存",
+        check("吧群签到设置页没有关闭开关", "gs_enabled" not in body)
+        check("吧群签到设置页有自动签到开关和独立时间",
+              all(k in body for k in
+                  ("gs_auto", "gs_auto_mode", "gs_auto_time")))
+        status, body = post("/api/groupsign/settings", {
+            "text": "签到领福利", "auto_groupsign": False,
+            "groupsign_time": "09:30"})
+        check("吧群签到默认文案与自动开关可保存",
               status == 200 and body["ok"] is True
-              and body["settings"]["enabled"] is False, body)
+              and body["settings"]["text"] == "签到领福利"
+              and autosign.get_settings()["auto_groupsign"] is False
+              and autosign.get_settings()["groupsign_time"] == "09:30",
+              body)
+        status, like_page = get("/settings/like")
+        check("GET /settings/like 200 且有自动开关/时间",
+              status == 200 and "随机点赞设置" in like_page
+              and all(k in like_page for k in
+                      ("lk_auto", "lk_auto_mode", "lk_auto_time")))
         status, body = get("/api/update/state")
         state = json.loads(body)["state"]
         check("GET /api/update/state 200",
@@ -304,6 +323,17 @@ def http_checks():
               state["current"]["package"] == "org.dsh.tiebaweb"
               and state["current"]["version_code"] > 0)
 
+        status, body = post("/api/auto/settings", {
+            "enabled": True, "global_time": "08:00",
+            "notify_system": True, "notify_dot": True,
+            "auto_groupsign": False, "groupsign_time": "09:30",
+            "auto_like": True, "like_time": "", "accounts": {},
+        })
+        check("自动模块开关/独立时间可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["auto_groupsign"] is False
+              and body["settings"]["groupsign_time"] == "09:30"
+              and body["settings"]["auto_like"] is True, body)
         status, body = post("/api/update/settings", {"auto_check": False})
         check("POST 设置成功", status == 200 and body["ok"] is True)
         check("设置真的生效了", updater.get_settings()["auto_check"] is False)
@@ -349,14 +379,14 @@ def http_checks():
 # --------------------------------------------------------------- 新加的小件
 def unit_checks():
     check("_progress_text 有百分比与 MB",
-          updater._progress_text("0.5.4", 5 * 1024 * 1024, 20 * 1024 * 1024)
-          == "正在下载 v0.5.4… 25%（5 / 20 MB）",
-          updater._progress_text("0.5.4", 5 * 1024 * 1024, 20 * 1024 * 1024))
+          updater._progress_text("0.5.7", 5 * 1024 * 1024, 20 * 1024 * 1024)
+          == "正在下载 v0.5.7… 25%（5 / 20 MB）",
+          updater._progress_text("0.5.7", 5 * 1024 * 1024, 20 * 1024 * 1024))
     check("_progress_text 没 Content-Length 时只说已下多少",
-          updater._progress_text("0.5.4", 3 * 1024 * 1024, 0)
-          == "正在下载 v0.5.4… 已下 3 MB")
+          updater._progress_text("0.5.7", 3 * 1024 * 1024, 0)
+          == "正在下载 v0.5.7… 已下 3 MB")
     check("_progress_text 进度不会超过 100%",
-          "100%" in updater._progress_text("0.5.4", 30 * 1024 * 1024,
+          "100%" in updater._progress_text("0.5.7", 30 * 1024 * 1024,
                                           20 * 1024 * 1024))
     set_state(dot=True)
     check("dot_pending 读到 True", updater.dot_pending() is True)

@@ -506,7 +506,8 @@ def _page_sign():
         "每天最多一次，全部完成后当天不再点。只点主楼赞，失败不影响签到。</div>"
         "<div class='btn-row' style='margin-top:12px'>"
         "<button class='btn btn-primary' id='like_btn' type='button'>"
-        "开始随机点赞</button></div></div>"
+        "开始随机点赞</button>"
+        "<a class='btn btn-ghost' href='/settings/like'>设置</a></div></div>"
         "<div id='like_state'></div>"
         "<div class='card'><div class='title'>吧群签到</div>"
         "<div class='hint'>按「吧群签到设置」里配置的群发送自定义消息；"
@@ -604,9 +605,11 @@ def _page_settings():
         "<span>自动水贴设置</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/groupsign'>"
         "<span>吧群签到设置</span><span class='arrow'>›</span></a>"
+        "<a class='menu-item' href='/settings/like'>"
+        "<span>随机点赞设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.5.3 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.5.6 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -782,6 +785,68 @@ def _size_text(num):
     return "{} KB".format(max(1, num // 1024))
 
 
+def _page_settings_like():
+    """随机点赞设置：每日自动开关 + 自动时间。"""
+    ast = autosign.get_settings()
+    html_part = (
+        "<div class='topbar'>随机点赞设置</div><main>"
+        "<div class='card'><div class='title'>说明</div>"
+        "<div class='hint'>随机点赞 = 每个关注的吧随机抽 1 个非置顶帖点主楼赞，"
+        "每个吧每天最多一次；只点主楼赞，失败不影响签到。<br>"
+        "签到页的「开始随机点赞」随时可以手动执行。</div></div>"
+        "<div class='card'><div class='title'>每日自动点赞</div>"
+        "<label class='menu-item'><span>每天自动执行</span>"
+        "<input type='checkbox' id='lk_auto'{}></label>"
+        "<div class='form'><label>自动时间</label>"
+        "<select class='input' id='lk_auto_mode' onchange='lkAutoMode()'>"
+        "<option value='follow'{}>跟随自动签到全局时间（{}）</option>"
+        "<option value='custom'{}>自定义</option></select></div>"
+        "<div id='lk_auto_time_wrap' style='display:{}'>"
+        "<div class='form'><label>自定义时间</label>"
+        "<input class='input' type='time' id='lk_auto_time' value='{}'>"
+        "</div></div>"
+        "<div class='hint'>关闭只影响每日自动，签到页的手动按钮仍然可用；"
+        "与自动签到共用前台服务。</div>"
+        "<button class='btn btn-primary' type='button' "
+        "onclick='lkSave()'>保存设置</button>"
+        "<div class='errorbox' id='lk_err'></div></div>"
+        "</main>"
+        "<div id='toast' style='display:none;position:fixed;left:50%;"
+        "bottom:86px;transform:translateX(-50%);background:#141821;color:#fff;"
+        "border-radius:999px;padding:12px 22px;font-size:14px;max-width:84%;"
+        "z-index:60'></div>"
+    ).format(
+        " checked" if ast.get("auto_like") else "",
+        " selected" if not ast.get("like_time") else "",
+        html.escape(ast.get("global_time") or "08:00"),
+        " selected" if ast.get("like_time") else "",
+        "block" if ast.get("like_time") else "none",
+        html.escape(ast.get("like_time") or ast.get("global_time") or "08:00"))
+    script = """
+<script>
+function lkToast(msg){var t=document.getElementById('toast');
+t.textContent=msg;t.style.display='block';
+setTimeout(function(){t.style.display='none';},3500);}
+function lkErr(msg){var e=document.getElementById('lk_err');
+e.style.display='block';e.textContent=msg;}
+function lkAutoMode(){
+var m=document.getElementById('lk_auto_mode');
+document.getElementById('lk_auto_time_wrap').style.display=
+(m.value==='custom')?'block':'none';}
+function lkSave(){
+var payload={auto_like:document.getElementById('lk_auto').checked,
+like_time:document.getElementById('lk_auto_mode').value==='custom'?
+document.getElementById('lk_auto_time').value:''};
+fetch('/api/auto/settings',{method:'POST',
+headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+.then(function(r){return r.json();}).then(function(j){
+if(j.ok){lkToast('设置已保存');}else{lkErr(j.detail||'保存失败');}})
+.catch(function(e){lkErr('请求失败：'+e);});}
+</script>
+"""
+    return _page("随机点赞设置", html_part + script, "settings")
+
+
 def _page_settings_auto():
     st = autosign.get_settings()
     acc_rows = []
@@ -876,6 +941,9 @@ def _page_settings_auto():
         "<input type='checkbox' id='notify_dot'{}></label>"
         "<div class='hint'>自动签到全部成功时不会提醒；只有出现失败才按上面两个"
         "开关分别通知。手动签到永不通知、永不出红点。</div></div>"
+        "<div class='hint'>吧群签到和随机点赞的自动开关/时间已移到各自设置页："
+        "<a href='/settings/groupsign'>吧群签到设置</a> · "
+        "<a href='/settings/like'>随机点赞设置</a></div>"
         "<div class='card'><div class='title'>各账号时间</div>{}</div>"
         "<div class='card'><div class='title'>最近一次自动签到结果</div>{}</div>"
         "<div class='btn-row'>"
@@ -1205,6 +1273,7 @@ def _page_settings_waterpost():
 def _page_settings_groupsign():
     """吧群签到设置：每个账号配置自己的群 + 自定义发送内容。"""
     st = groupsign.get_settings()
+    ast = autosign.get_settings()
     accounts = storage.list_accounts()
     gmap = {a["account_id"]: a["groups"] for a in st["accounts"]}
     today = time.strftime("%Y-%m-%d")
@@ -1281,9 +1350,22 @@ def _page_settings_groupsign():
         "「@群助手/领取今日福利」），由群里的机器人完成签到/领福利。<br>"
         "每个账号只发自己配置的群；<b>每个群每天发送成功后就不再发</b>，"
         "失败可以重试，但每天最多 3 次。发送失败不会影响吧签到。</div></div>"
-        "<div class='card'><div class='title'>开关与默认内容</div>"
-        "<label class='menu-item'><span>启用吧群签到</span>"
-        "<input type='checkbox' id='gs_enabled'{}></label>"
+        "<div class='card'><div class='title'>自动吧群签到</div>"
+        "<label class='menu-item'><span>每天自动执行</span>"
+        "<input type='checkbox' id='gs_auto'{}></label>"
+        "<div class='form'><label>自动时间</label>"
+        "<select class='input' id='gs_auto_mode' onchange='gsAutoMode()'>"
+        "<option value='follow'{}>跟随自动签到全局时间（{}）</option>"
+        "<option value='custom'{}>自定义</option></select></div>"
+        "<div id='gs_auto_time_wrap' style='display:{}'>"
+        "<div class='form'><label>自定义时间</label>"
+        "<input class='input' type='time' id='gs_auto_time' value='{}'>"
+        "</div></div>"
+        "<div class='hint'>关闭只影响每日自动，签到页的手动「开始吧群签到」"
+        "仍然可用；与自动签到共用前台服务。</div></div>"
+        "<div class='card'><div class='title'>默认内容</div>"
+        "<div class='hint'>吧群签到默认启用，内置在 App 里，不能关闭；"
+        "不需要时把账号的群删掉即可。</div>"
         "<div class='form'><label>默认发送内容</label>"
         "<input class='input' id='gs_text' value='{}'></div>"
         "<button class='btn btn-primary' type='button' "
@@ -1296,7 +1378,13 @@ def _page_settings_groupsign():
         "border-radius:999px;padding:12px 22px;font-size:14px;max-width:84%;"
         "z-index:60'></div>"
     ).format(
-        " checked" if st.get("enabled") else "",
+        " checked" if ast.get("auto_groupsign") else "",
+        " selected" if not ast.get("groupsign_time") else "",
+        html.escape(ast.get("global_time") or "08:00"),
+        " selected" if ast.get("groupsign_time") else "",
+        "block" if ast.get("groupsign_time") else "none",
+        html.escape(ast.get("groupsign_time") or
+                    ast.get("global_time") or "08:00"),
         html.escape(default_text, quote=True),
         "".join(cards))
 
@@ -1311,9 +1399,15 @@ function gsOk(id){var e=document.getElementById(id);if(e){e.style.display='none'
 function gsPost(path,body){return fetch(path,{method:'POST',
 headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
 .then(function(r){return r.json();});}
+function gsAutoMode(){
+var m=document.getElementById('gs_auto_mode');
+document.getElementById('gs_auto_time_wrap').style.display=
+(m.value==='custom')?'block':'none';}
 function gsSaveSettings(){
-var payload={enabled:document.getElementById('gs_enabled').checked,
-text:document.getElementById('gs_text').value};
+var payload={text:document.getElementById('gs_text').value,
+auto_groupsign:document.getElementById('gs_auto').checked,
+groupsign_time:document.getElementById('gs_auto_mode').value==='custom'?
+document.getElementById('gs_auto_time').value:''};
 gsPost('/api/groupsign/settings',payload).then(function(j){
 if(j.ok){gsToast('设置已保存');setTimeout(function(){location.reload();},500);}
 else{gsErr('gs_err_settings',j.detail||'保存失败');}})
@@ -1476,6 +1570,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 _send_html(self, _page_settings_waterpost())
             elif path == "/settings/groupsign":
                 _send_html(self, _page_settings_groupsign())
+            elif path == "/settings/like":
+                _send_html(self, _page_settings_like())
             elif path == "/settings/update":
                 # 进入这一页就算看过了：红点清掉（与签到页同样的约定）。
                 # 没查到东西时这里本来也没红点，所以清不清都一样。
@@ -1767,12 +1863,18 @@ class AppHandler(BaseHTTPRequestHandler):
                 "global_time": gt or None,
                 "notify_system": data.get("notify_system"),
                 "notify_dot": data.get("notify_dot"),
+                "auto_groupsign": data.get("auto_groupsign"),
+                "groupsign_time": data.get("groupsign_time"),
+                "auto_like": data.get("auto_like"),
+                "like_time": data.get("like_time"),
                 "accounts": data.get("accounts"),
             })
-            if "enabled" in data:
+            if any(k in data for k in ("enabled", "auto_groupsign",
+                                       "auto_like", "groupsign_time",
+                                       "like_time")):
                 # Immediate: start/stop the foreground service and fire the
                 # POST_NOTIFICATIONS permission request (Android 13+).
-                autosign.apply_settings_immediately(bool(data["enabled"]))
+                autosign.apply_settings_immediately()
         except Exception as exc:  # noqa: BLE001
             _send_json(self, {"ok": False, "detail": "保存失败：{}".format(exc)})
             return
@@ -1929,11 +2031,16 @@ class AppHandler(BaseHTTPRequestHandler):
     def _api_groupsign_settings(self, data):
         try:
             payload = {}
-            if "enabled" in data:
-                payload["enabled"] = data.get("enabled")
             if "text" in data:
                 payload["text"] = data.get("text")
+            auto_payload = {}
+            for key in ("auto_groupsign", "groupsign_time"):
+                if key in data:
+                    auto_payload[key] = data.get(key)
             settings = groupsign.save_settings(payload)
+            if auto_payload:
+                autosign.save_settings(auto_payload)
+                autosign.apply_settings_immediately()
         except ValueError as exc:
             _send_json(self, {"ok": False, "detail": str(exc)})
             return

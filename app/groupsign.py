@@ -53,7 +53,7 @@ _UA = ("Mozilla/5.0 (Linux; Android 12; Pixel 6) "
        "Chrome/120.0.0.0 Mobile Safari/537.36")
 _CHATROOM_RE = re.compile(r"(?:^|[?&])chatroom_id=(\d+)")
 
-_DEFAULT = {"enabled": True, "text": _DEFAULT_TEXT, "accounts": {}}
+_DEFAULT = {"text": _DEFAULT_TEXT, "accounts": {}}
 _lock = threading.RLock()
 _cache = None
 
@@ -126,13 +126,11 @@ def _load():
     with _lock:
         if _cache is not None:
             return json.loads(json.dumps(_cache))
-        data = {"enabled": bool(_DEFAULT["enabled"]),
-                "text": _DEFAULT_TEXT, "accounts": {}}
+        data = {"text": _DEFAULT_TEXT, "accounts": {}}
         try:
             with open(_data_path(), "r", encoding="utf-8") as fh:
                 loaded = json.load(fh)
             if isinstance(loaded, dict):
-                data["enabled"] = bool(loaded.get("enabled", True))
                 data["text"] = _clean_text(loaded.get("text"), _DEFAULT_TEXT)
                 accounts = loaded.get("accounts")
                 if isinstance(accounts, dict):
@@ -203,14 +201,11 @@ def get_settings():
             "account_id": int(aid) if str(aid).isdigit() else aid,
             "groups": groups,
         })
-    return {"enabled": bool(data["enabled"]), "text": data["text"],
-            "accounts": accounts}
+    return {"text": data["text"], "accounts": accounts}
 
 
 def save_settings(payload):
     data = _load()
-    if "enabled" in payload:
-        data["enabled"] = bool(payload["enabled"])
     if "text" in payload:
         text = _clean_text(payload.get("text"), "")
         if not text:
@@ -369,13 +364,10 @@ def _record_run(account_id, chatroom_id, ok, detail="", attempts=1):
 async def run_account_async(client, account, secret=None):
     """在签到流程末尾调用：把该账号配置的群各发一次。
 
-    返回 {"status": "disabled|empty|done", "sent", "skipped", "failed",
+    返回 {"status": "empty|done", "sent", "skipped", "failed",
           "total", "details", "warnings"}；不抛异常给签到主流程。
     """
     data = _load()
-    if not data["enabled"]:
-        return {"status": "disabled", "sent": 0, "skipped": 0,
-                "failed": 0, "total": 0, "details": [], "warnings": []}
     _patch_blcp_ssl()
     aid = str(account["id"])
     acct = data["accounts"].get(aid) or {}
