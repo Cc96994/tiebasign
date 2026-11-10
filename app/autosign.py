@@ -33,9 +33,14 @@ _DEFAULTS = {
     "global_time": "08:00",
     "notify_system": True,
     "notify_dot": True,
+    "auto_groupsign": True,
+    "auto_like": True,
+    "groupsign_time": "",
+    "like_time": "",
     "accounts": {},   # {str(account_id): {"follow_global": bool, "custom_time": "HH:MM"}}
     "runs": {},       # {str(account_id): {"date": "YYYY-MM-DD", "ts": iso}}
     "results": {},    # {str(account_id): latest snapshot}
+    "module_runs": {},  # {"groupsign"/"like": {"date","ts","attempts","attempt_date"}}
 }
 
 _lock = threading.RLock()
@@ -74,6 +79,9 @@ def _load():
                             if isinstance(v, dict)}
             data["results"] = {str(k): v for k, v in data["results"].items()
                                if isinstance(v, dict)}
+            data["module_runs"] = {str(k): v for k, v in
+                                   data["module_runs"].items()
+                                   if isinstance(v, dict)}
         except FileNotFoundError:
             pass
         except Exception as exc:  # noqa: BLE001 - corrupt settings: start fresh
@@ -138,6 +146,10 @@ def get_settings():
         "global_time": _validate_time(data["global_time"]) or "08:00",
         "notify_system": bool(data["notify_system"]),
         "notify_dot": bool(data["notify_dot"]),
+        "auto_groupsign": bool(data.get("auto_groupsign", True)),
+        "auto_like": bool(data.get("auto_like", True)),
+        "groupsign_time": _validate_time(data.get("groupsign_time")) or "",
+        "like_time": _validate_time(data.get("like_time")) or "",
         "accounts": accounts,
     }
 
@@ -154,6 +166,12 @@ def save_settings(payload):
         data["notify_system"] = bool(payload["notify_system"])
     if "notify_dot" in payload:
         data["notify_dot"] = bool(payload["notify_dot"])
+    for key in ("auto_groupsign", "auto_like"):
+        if key in payload and payload[key] is not None:
+            data[key] = bool(payload[key])
+    for key in ("groupsign_time", "like_time"):
+        if key in payload and payload[key] is not None:
+            data[key] = _validate_time(payload.get(key)) or ""
     accounts_payload = payload.get("accounts")
     if isinstance(accounts_payload, dict):
         for aid, cfg in accounts_payload.items():
@@ -492,6 +510,85 @@ def _run_due(accounts, today):
         _run_now_flag = False
 
 
+_MODULES = (
+    ("groupsign", "auto_groupsign", "groupsign_time", "吧群签到"),
+    ("like", "auto_like", "like_time", "随机点赞"),
+)
+
+
+def _module_time(data, key):
+    return _validate_time(data.get(key)) or data["global_time"]
+
+
+def _all_pairs():
+    """所有账号的 [(account, bduss)]；坏账号跳过，不让一个账号拖垮全部。"""
+    import keystore_crypto
+    import storage
+    import tieba_api
+
+    pairs = []
+    for account in storage.list_accounts():
+        enc = storage.get_encrypted_bduss(account["id"])
+        if not enc:
+            continue
+        try:
+            bduss = keystore_crypto.decrypt_text(enc)
+        except Exception as exc:  # noqa: BLE001
+            _log("module pair decrypt failed account_id={} {}: {}".format(
+                account.get("id"), type(exc).__name__, exc))
+            continue
+        if tieba_api.format_check(bduss):
+            continue
+        pairs.append((account, bduss))
+    return pairs
+
+
+def _run_auto_modules(data, today, hhmm):
+    """每日自动执行吧群签到/随机点赞；各自有独立开关和时间。"""
+    for key, switch, timekey, label in _MODULES:
+        if not data.get(switch, True):
+            continue
+        if hhmm < _module_time(data, timekey):
+            continue
+        rec = (data.get("module_runs") or {}).get(key) or {}
+        if rec.get("date") == today:
+            continue
+        if rec.get("attempt_date") == today and int(
+                rec.get("attempts") or 0) >= 3:
+            continue
+        pairs = _all_pairs()
+        if not pairs:
+            _log("auto module {}: no usable accounts".format(key))
+            continue
+        try:
+            if key == "groupsign":
+                import groupsign as module
+            else:
+                import liker as module
+            _rid, err = module.start(pairs)
+        except Exception as exc:  # noqa: BLE001
+            err = "{}: {}".format(type(exc).__name__, exc)
+        if err:
+            if "正在进行" in err:
+                continue
+            fresh = _load()
+            rec = dict((fresh.get("module_runs") or {}).get(key) or {})
+            rec["attempts"] = int(rec.get("attempts") or 0) + 1
+            rec["attempt_date"] = today
+            fresh.setdefault("module_runs", {})[key] = rec
+            _save(fresh)
+            _log("auto module {} start failed: {}".format(key, err))
+            continue
+        fresh = _load()
+        fresh.setdefault("module_runs", {})[key] = {
+            "date": today,
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "attempts": 0,
+        }
+        _save(fresh)
+        _log("auto module {} started today".format(key))
+
+
 def _scheduler_loop():
     global _run_now_flag
     first = True
@@ -499,7 +596,8 @@ def _scheduler_loop():
         try:
             data = _load()
             enabled = bool(data["enabled"])
-            keepalive = enabled
+            keepalive = (enabled or bool(data.get("auto_groupsign", True))
+                         or bool(data.get("auto_like", True)))
             if not keepalive:
                 # 水贴开启时同样需要前台服务：两次发送之间可能相隔很久，
                 # 进程被系统回收就会漏发。两边任一开启即保活。
@@ -519,12 +617,12 @@ def _scheduler_loop():
             if first:
                 first = False
                 _log("scheduler started enabled={}".format(enabled))
+            now = time.localtime()
+            hhmm = time.strftime("%H:%M", now)
+            today = time.strftime("%Y-%m-%d", now)
             if enabled:
                 import storage
 
-                now = time.localtime()
-                hhmm = time.strftime("%H:%M", now)
-                today = time.strftime("%Y-%m-%d", now)
                 due = []
                 run_now = False
                 with _lock:
@@ -541,6 +639,10 @@ def _scheduler_loop():
                     _log("due accounts: {} (run_now={})".format(
                         [a["id"] for a in due], run_now))
                     _run_due(due, today)
+
+            # 两个独立模块有自己的每日开关/时间；即使自动签到总开关关着，
+            # 只要模块开关是开的也执行。
+            _run_auto_modules(data, today, hhmm)
         except Exception as exc:  # noqa: BLE001
             _log("scheduler loop error: {} {}\n{}".format(
                 type(exc).__name__, exc, traceback.format_exc()))
@@ -559,12 +661,17 @@ def _scheduler_loop():
         time.sleep(20)
 
 
-def apply_settings_immediately(enabled):
-    """After the user toggles the master switch, start/stop keep-alive and
-    request the notification permission right away instead of waiting for the
-    20s scheduler tick."""
+def apply_settings_immediately(enabled=None):
+    """After settings change, start/stop keep-alive right away.
+
+    模块自动开关也算保活需求；参数 enabled 只用于兼容旧调用。
+    """
+    data = _load()
+    keepalive = bool(data["enabled"]) if enabled is None else bool(enabled)
+    keepalive = (keepalive or bool(data.get("auto_groupsign", True))
+                 or bool(data.get("auto_like", True)))
     try:
-        _ensure_keepalive(bool(enabled))
+        _ensure_keepalive(keepalive)
         return True
     except Exception as exc:  # noqa: BLE001
         _log("apply_settings_immediately failed: {} {}".format(

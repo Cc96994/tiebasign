@@ -90,7 +90,7 @@ def reset():
 
 
 def seed(groups, text="@群助手/领取今日福利"):
-    data = {"enabled": True, "text": text, "accounts": {
+    data = {"text": text, "accounts": {
         "1": {"groups": groups, "runs": {}}}}
     groupsign._save(data)
 
@@ -167,20 +167,14 @@ def test_account_error_stops_remaining():
           result["total"] == 2 and result["skipped"] == 1, result)
 
 
-def test_no_groups_and_disabled():
+def test_no_groups():
     reset()
     seed([])
     result = run(FakeClient())
     check("没有群 -> empty", result["status"] == "empty", result)
-
-    seed([group(1, 2)])
     data = groupsign._load()
-    data["enabled"] = False
-    groupsign._save(data)
-    client = FakeClient()
-    result = run(client)
-    check("关闭开关 -> disabled", result["status"] == "disabled", result)
-    check("关闭开关 -> 不发送", client.sent == [], client.sent)
+    check("吧群签到默认启用（数据里不再有开关）",
+          "enabled" not in data, data)
 
 
 def test_add_parse_and_manage():
@@ -240,7 +234,7 @@ def main():
     print("== 自定义文案 =="); test_custom_text()
     print("== 失败次数上限 =="); test_failure_attempt_limit()
     print("== 账号错误 =="); test_account_error_stops_remaining()
-    print("== 空/关闭 =="); test_no_groups_and_disabled()
+    print("== 空 =="); test_no_groups()
     print("== 群管理 =="); test_add_parse_and_manage()
     print("== 独立模块 =="); test_start_standalone()
     print()

@@ -4,7 +4,7 @@
 
 | 平台 | 地址 | 现状 |
 |---|---|---|
-| GitHub | https://github.com/Cc96994/tiebasign | 有 V0.3.0 / V0.4.0 Release；源码已同步（0.5.3 待发布） |
+| GitHub | https://github.com/Cc96994/tiebasign | 有 V0.3.0 / V0.4.0 / V0.5.3 Release；源码已同步（0.5.6 待发布） |
 | Gitee | https://gitee.com/Cc96994/tiebasign | 有仓库；**还没有任何发行版** |
 
 APK 走 Releases 发布，**不要 push 进 git**。
@@ -85,7 +85,7 @@ bash scripts/leak_scan.sh        # 要求 RESULT: CLEAN
   授权必须跟着每一个分发副本走。**不要只在建仓时勾选 GitHub 的 "Add a license"** ——
   那样只有 GitHub 有 LICENSE，从 Gitee 下载的人处在"默认保留所有权利"状态，
   同一个项目在两个平台的法律授权会不一致。
-- **待补（排入 0.5.3）**：第三方依赖的许可证文本与署名。`chardet`（LGPL-2.1）与
+- **待补（排入 0.5.6）**：第三方依赖的许可证文本与署名。`chardet`（LGPL-2.1）与
   `certifi`（MPL-2.0）属弱 copyleft，要求分发时附带其许可证文本；当前 APK 内不含任何
   许可证文件。做法是增加 `THIRD-PARTY-NOTICES.md`。
 

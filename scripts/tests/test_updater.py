@@ -114,7 +114,7 @@ def gitee_dl(tag, name):
     return "https://gitee.com/Cc96994/tiebasign/releases/download/{}/{}".format(tag, name)
 
 
-def gh_release(version="0.5.4", code=1023504, with_update=True, digest=None,
+def gh_release(version="0.5.7", code=1023507, with_update=True, digest=None,
                apk_size=21000000):
     """在真实响应之上追加一个"更新的版本"，用来测发现更新这条路径。"""
     tag = "V" + version
@@ -143,7 +143,7 @@ def gitee_release(version="0.6.0"):
             "assets": [{"name": apk, "browser_download_url": gitee_dl(tag, apk)}]}
 
 
-def update_body(version="0.5.4", code=1023504, sha=None):
+def update_body(version="0.5.7", code=1023507, sha=None):
     apk = "tieba-sign-assistant-{}-arm64-v8a-release.apk".format(version)
     return {"version": version, "versionCode": code, "sha256": sha or "b" * 64,
             "apk": apk, "size": 21000000, "notes": "修了点东西",
@@ -290,9 +290,9 @@ check("真实空响应 [] -> 空", updater._parse_releases(src_gitee, []) == [])
 
 # ============================================================ 4 选最新
 older = updater._parse_releases(src_gh, GITHUB_REAL)[0]
-newer = updater._parse_releases(src_gh, [gh_release("0.5.4")])[0]
+newer = updater._parse_releases(src_gh, [gh_release("0.5.7")])[0]
 check("pick: 取版本大的",
-      updater._pick_newest([older, newer])["version"] == (0, 5, 4))
+      updater._pick_newest([older, newer])["version"] == (0, 5, 7))
 check("pick: 同版本时保留先出现的源（GitHub 优先）",
       updater._pick_newest([older, dict(older, source="gitee")])["source"] == "github")
 check("pick: 空列表 -> None", updater._pick_newest([]) is None)
@@ -303,7 +303,7 @@ install_http({GH_LIST: GITHUB_REAL, GITEE_LIST: []})
 updater._call_static_raw = lambda name, args: (True, None)
 updater._check_worker(by_user=True)
 st = updater._load()
-check("今天真实情况: V0.3.0 < 当前 0.5.3 -> 不报更新", st["phase"] == "idle", st["phase"])
+check("今天真实情况: V0.3.0 < 当前 0.5.6 -> 不报更新", st["phase"] == "idle", st["phase"])
 check("今天真实情况: 不置红点", st["dot"] is False)
 check("今天真实情况: latest 为空", st["latest"] is None)
 check("今天真实情况: 成功的检查写了 last_check_date",
@@ -314,6 +314,22 @@ check("今天真实情况: Gitee 返 [] 记为 empty 而不是 error",
       reports["gitee"]["status"] == "empty", reports)
 check("今天真实情况: 详情里写明已是最新",
       "已是最新" in st["detail"], st["detail"])
+
+# 5b 已经升级到当前版本后，旧的「已下载待安装」必须自动清掉
+stale_path = os.path.join(updater._download_dir(), "stale-0.5.4.apk")
+os.makedirs(updater._download_dir(), exist_ok=True)
+with open(stale_path, "wb") as fh:
+    fh.write(b"stale")
+reset(phase="ready", dot=True,
+      downloaded={"path": stale_path, "version": "0.5.4",
+                  "version_code": updater._APP_VERSION_CODE - 1},
+      latest={"version": "0.5.7",
+              "version_code": updater._APP_VERSION_CODE - 1})
+st = updater.get_state()
+check("升级后不再显示旧的已下载待安装", st["downloaded"] is None, st["downloaded"])
+check("升级后旧的待安装文件被删掉", not os.path.exists(stale_path))
+check("升级后旧 latest/红点清掉",
+      st["latest"] is None and st["dot"] is False, st)
 
 # =================================================== 6 两个源都失败 -> 静默
 reset()
@@ -334,18 +350,18 @@ check("全失败: latest 仍为空", st["latest"] is None)
 reset(auto_download=False)
 notify = []
 updater._call_static_raw = lambda name, args: (notify.append((name, args)), (True, None))[1]
-install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.4", digest="a" * 64)],
+install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.7", digest="a" * 64)],
               GITEE_LIST: [],
-              gh_dl("V0.5.4", "update.json"): update_body()})
+              gh_dl("V0.5.7", "update.json"): update_body()})
 updater._download_async = REAL_DOWNLOAD_ASYNC
 updater.check_async = REAL_CHECK_ASYNC
 updater._check_worker(by_user=True)
 st = updater._load()
 check("新版本: phase=available", st["phase"] == "available", st["phase"])
-check("新版本: version=0.5.4", (st["latest"] or {}).get("version") == "0.5.4",
+check("新版本: version=0.5.7", (st["latest"] or {}).get("version") == "0.5.7",
       st["latest"])
 check("新版本: versionCode 来自 update.json",
-      (st["latest"] or {}).get("version_code") == 1023504, st["latest"])
+      (st["latest"] or {}).get("version_code") == 1023507, st["latest"])
 check("新版本: sha256 来自 update.json（不是 assets 的 digest）",
       (st["latest"] or {}).get("sha256") == "b" * 64, st["latest"])
 check("新版本: 来源标为 github", (st["latest"] or {}).get("source") == "github")
@@ -354,16 +370,16 @@ check("新版本: 弹了一次通知", len(notify) == 1, notify)
 check("新版本: 通知走的是 notifyUpdateReady",
       bool(notify) and notify[0][0] == "notifyUpdateReady", notify)
 check("新版本: 记下 notified_version 防止天天打扰",
-      st["notified_version"] == "0.5.4", st["notified_version"])
+      st["notified_version"] == "0.5.7", st["notified_version"])
 updater._check_worker(by_user=True)
 check("新版本: 第二次检查不再重复通知", len(notify) == 1, len(notify))
 
 # =================================================== 8 versionCode 是硬判据
 reset(auto_download=False)
-install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.4", digest="a" * 64)],
+install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.7", digest="a" * 64)],
               GITEE_LIST: [],
-              # tag 说 0.5.4，update.json 的 versionCode 却还是 0.4.0 那个
-              gh_dl("V0.5.4", "update.json"): update_body("0.5.4", code=1023400)})
+              # tag 说 0.5.7，update.json 的 versionCode 却还是 0.4.0 那个
+              gh_dl("V0.5.7", "update.json"): update_body("0.5.7", code=1023400)})
 updater._check_worker(by_user=True)
 st = updater._load()
 check("versionCode 防线: tag 更新但 versionCode 不更大 -> 不算更新",
@@ -373,7 +389,7 @@ check("versionCode 防线: 不置红点", st["dot"] is False)
 
 # =================================================== 9 没有 update.json 的兜底
 reset(auto_download=False)
-install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.4", with_update=False,
+install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.7", with_update=False,
                                                 digest="c" * 64)],
               GITEE_LIST: []})
 updater._check_worker(by_user=True)
@@ -405,8 +421,8 @@ reset(auto_download=True, wifi_only=True)
 downloaded = []
 updater.download_async = lambda: (downloaded.append(1), (True, None))[1]
 updater._is_on_wifi = lambda: False
-install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.4")], GITEE_LIST: [],
-              gh_dl("V0.5.4", "update.json"): update_body(sha="d" * 64)})
+install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.7")], GITEE_LIST: [],
+              gh_dl("V0.5.7", "update.json"): update_body(sha="d" * 64)})
 updater._check_worker(by_user=True)
 st = updater._load()
 check("非 Wi-Fi: 不自动下载", not downloaded, downloaded)
@@ -417,8 +433,8 @@ reset(auto_download=True, wifi_only=True)
 downloaded = []
 updater.download_async = lambda: (downloaded.append(1), (True, None))[1]
 updater._is_on_wifi = lambda: True
-install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.4")], GITEE_LIST: [],
-              gh_dl("V0.5.4", "update.json"): update_body(sha="e" * 64)})
+install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.7")], GITEE_LIST: [],
+              gh_dl("V0.5.7", "update.json"): update_body(sha="e" * 64)})
 updater._check_worker(by_user=True)
 check("是 Wi-Fi: 自动开始下载", downloaded == [1], downloaded)
 
@@ -427,8 +443,8 @@ reset(auto_download=True, wifi_only=True)
 downloaded = []
 updater.download_async = lambda: (downloaded.append(1), (True, None))[1]
 updater._is_on_wifi = lambda: None
-install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.4")], GITEE_LIST: [],
-              gh_dl("V0.5.4", "update.json"): update_body(sha="f" * 64)})
+install_http({GH_LIST: GITHUB_REAL + [gh_release("0.5.7")], GITEE_LIST: [],
+              gh_dl("V0.5.7", "update.json"): update_body(sha="f" * 64)})
 updater._check_worker(by_user=True)
 check("网络类型未知: fail-open 仍下载（否则可能永远收不到更新）",
       downloaded == [1], downloaded)
@@ -476,7 +492,7 @@ updater.time = REAL_TIME
 
 # =================================================== 12 候选地址顺序（GitHub 优先）
 reset(download_mode="auto")
-latest = {"tag": "V0.5.4", "apk_name": "a.apk", "source": "github"}
+latest = {"tag": "V0.5.7", "apk_name": "a.apk", "source": "github"}
 c = updater._candidates(latest)
 check("候选: auto 模式 GitHub 在前、Gitee 在后",
       [x[0] for x in c] == ["github", "gitee"], c)
@@ -500,7 +516,7 @@ def make_apk(name="dl.apk", data=b"fakeapk"):
 
 
 def stage(path):
-    reset(downloaded={"path": path, "version": "0.5.4", "version_code": 1023504,
+    reset(downloaded={"path": path, "version": "0.5.7", "version_code": 1023507,
                       "sha256": "a" * 64, "size": 10, "name": "dl.apk",
                       "source": "github", "ts": updater._now()})
 
@@ -536,7 +552,7 @@ check("安装校验: 降级包 -> 文件已删除", not os.path.exists(p))
 p = make_apk("good.apk")
 stage(p)
 updater.inspect_apk = lambda path: ({"package": updater._PACKAGE,
-                                     "version_code": 1023504,
+                                     "version_code": 1023507,
                                      "signer": updater._SIGNER_SHA256}, None)
 called = []
 updater._call_static_raw = lambda name, args: (called.append((name, args)), (True, None))[1]
@@ -600,8 +616,8 @@ path = updater.selftest()
 check("selftest: 落盘成功且文件存在", os.path.isfile(path), path)
 state = updater.get_state()
 check("get_state: 当前版本与 spec 一致",
-      state["current"]["version"] == "0.5.3"
-      and state["current"]["version_code"] == 1023503, state["current"])
+      state["current"]["version"] == "0.5.6"
+      and state["current"]["version_code"] == 1023506, state["current"])
 check("get_state: 包名是 org.dsh.tiebaweb",
       state["current"]["package"] == "org.dsh.tiebaweb")
 check("get_state: 两个源都在", [s["id"] for s in state["sources"]] == ["github", "gitee"])
