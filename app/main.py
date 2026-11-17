@@ -616,10 +616,6 @@ def _page_settings():
             update_label = "检查更新 · 发现 v{}".format(latest["version"])
     except Exception:  # noqa: BLE001
         pass
-    try:
-        app_version = updater.get_settings()["current"]["version"]
-    except Exception:  # noqa: BLE001 - 读不到版本也不能让设置页崩
-        app_version = "?"
     body = (
         "<div class='topbar'>设置</div><main>"
         "<div class='card'><a class='menu-item' href='/settings/update'>"
@@ -638,12 +634,10 @@ def _page_settings():
         "<a class='menu-item' href='/settings/like'>"
         "<span>随机点赞设置</span><span class='arrow'>›</span></a>"
         "</div>"
-        + (
-            "<div class='card'><div class='title'>关于</div>"
-            "<div class='hint'>贴吧签到助手 {} · aiotieba 4.7.1<br>"
-            "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
-            "</div></main>"
-        ).format(html.escape(app_version))
+        "<div class='card'><div class='title'>关于</div>"
+        "<div class='hint'>贴吧签到助手 0.6.0 · aiotieba 4.7.1<br>"
+        "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
+        "</div></main>"
     )
     return _page("设置", body, "settings", dot=autosign.dot_pending(),
                  update_dot=_update_dot())
