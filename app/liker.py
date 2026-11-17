@@ -39,9 +39,19 @@ _DATA_FILENAME = "tiebasign_like.json"
 _MAX_FORUM_PAGES = 25
 _LIKE_CONCURRENCY = 5
 _LIKE_DELAY = (0.25, 0.5)
+#: L3：取帖是纯读、风控权重低，单独给 12 并发；点赞仍由 _LIKE_CONCURRENCY 管。
+_FETCH_CONCURRENCY = 12
 _LIKE_RETRIES = 2
 _RL_CODE = 3280004
 _RN = 30
+#: L1/L2：进程内累积，每 20 个「ok 状态变化」才整文件落盘一次，结束再落一次。
+_FLUSH_EVERY = 20
+#: L5：点赞请求的全局速率（每秒）与突发；M3 档位会按并发/延迟换算后覆盖。
+_LIKE_RATE = 10.0
+_LIKE_BURST = 5.0
+_MIN_LIKE_RATE = 1.0
+#: L4：撞 3280004 后的全局冷却时间（秒）；测试可调小。
+_RL_BACKOFF = (5.0, 12.0)
 
 #: 分段耗时（P0-2）：拉列表 / 取帖 / 点赞前等待 / 点赞请求。
 PHASE_LIST = "list"
@@ -82,6 +92,42 @@ def _save(data):
     os.replace(tmp, path)
 
 
+class _RateLimiter:
+    """L5：按全局每秒速率放行请求的令牌桶。
+
+    限的是「每秒几个请求」而不是「同时几个」；撞限流降速时（L6）rate 会砍半。
+    只在点赞协程所在的单个事件循环里使用，不需要线程锁。
+    """
+
+    def __init__(self, rate_per_sec, burst=None):
+        self.rate = max(0.1, float(rate_per_sec))
+        self.capacity = max(1.0, float(burst if burst is not None
+                                       else rate_per_sec))
+        self._tokens = self.capacity
+        self._updated = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self):
+        while True:
+            wait = 0.0
+            async with self._lock:
+                now = time.monotonic()
+                self._tokens = min(
+                    self.capacity,
+                    self._tokens + (now - self._updated) * self.rate)
+                self._updated = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self.rate
+            await asyncio.sleep(wait)
+
+    def slow_down(self):
+        """L6：撞一次限流就把全局速率砍半（不低于 _MIN_LIKE_RATE）。"""
+        self.rate = max(_MIN_LIKE_RATE, self.rate / 2.0)
+        self.capacity = max(1.0, min(self.capacity, self.rate))
+
+
 def _today():
     return time.strftime("%Y-%m-%d")
 
@@ -100,52 +146,55 @@ def _phase_add(sub, phase, started_ms):
     phases[phase] = int(phases.get(phase) or 0) + spent
 
 
-def _persist_last_run(sub, elapsed_ms):
-    """把本轮分段耗时写进 tiebasign_like.json，重启后还能复盘。
+def _note_last_run(data, sub, elapsed_ms):
+    """把本轮分段耗时写进内存 store；由调用方在结束时统一落盘。
 
     点赞是隔天首跑才准的（当天点过的吧会被跳过），所以数据必须落盘，
     不能只留在内存状态里。
     """
-    try:
-        data = _load()
-        aid = sub.get("account_id")
-        if aid is None:
-            return
-        aid = str(aid)
-        runs = data.get("last_runs")
-        if not isinstance(runs, dict):
-            runs = {}
-            data["last_runs"] = runs
-        runs[aid] = {
-            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "elapsed_ms": int(elapsed_ms),
-            "total": int(sub.get("total") or 0),
-            "success": int(sub.get("success") or 0),
-            "failed": int(sub.get("failed") or 0),
-            "skipped": int(sub.get("skipped") or 0),
-            "phase_ms": dict(sub.get("phase_ms") or {}),
-        }
-        _save(data)
-    except Exception:  # noqa: BLE001 - 统计落盘失败不能影响点赞
-        pass
+    aid = sub.get("account_id")
+    if aid is None:
+        return
+    aid = str(aid)
+    runs = data.get("last_runs")
+    if not isinstance(runs, dict):
+        runs = {}
+        data["last_runs"] = runs
+    runs[aid] = {
+        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "elapsed_ms": int(elapsed_ms),
+        "total": int(sub.get("total") or 0),
+        "success": int(sub.get("success") or 0),
+        "failed": int(sub.get("failed") or 0),
+        "skipped": int(sub.get("skipped") or 0),
+        "phase_ms": dict(sub.get("phase_ms") or {}),
+    }
 
 
-def _get_forum_record(account_id, fname):
-    data = _load()
+def _get_forum_record(data, account_id, fname):
     acct = data["accounts"].get(str(account_id)) or {}
     if acct.get("date") != _today():
         return None
     return (acct.get("forums") or {}).get(fname)
 
 
-def _record_forum(account_id, fname, ok, tid=None, title=None,
+def _record_forum(data, account_id, fname, ok, tid=None, title=None,
                   code=None, reason=None, advice=None, detail=None, raw=None):
-    data = _load()
+    """把一次点赞结果写进内存 store，返回 ``ok`` 状态是否变化。
+
+    L1：每个吧不再整文件 load + save，只在进程内更新字典；
+    L2：只有「ok 状态变化」才计入批量落盘的计数，失败重试仍是失败时不写盘。
+    """
     aid = str(account_id)
     acct = data["accounts"].get(aid) or {}
     if acct.get("date") != _today():
         acct = {"date": _today(), "forums": {}}
-    acct["forums"][fname] = {
+    forums = acct.get("forums")
+    if not isinstance(forums, dict):
+        forums = {}
+    prev = forums.get(fname)
+    changed = prev is None or bool(prev.get("ok")) != bool(ok)
+    forums[fname] = {
         "ok": bool(ok),
         "tid": int(tid) if tid else None,
         "title": redact.scrub(title or "")[:80],
@@ -156,9 +205,9 @@ def _record_forum(account_id, fname, ok, tid=None, title=None,
         "detail": redact.scrub(detail or ""),
         "raw": redact.scrub(raw or ""),
     }
+    acct["forums"] = forums
     data["accounts"][aid] = acct
-    _save(data)
-    return acct["forums"][fname]
+    return changed
 
 
 def get_settings():
@@ -353,22 +402,47 @@ async def _fetch_forums(client, sub):
     return forums
 
 
-async def _agree_with_retry(client, tid):
-    """点赞；3280004 表示操作太频繁，退避后重试，不把整轮都撞死。"""
+async def _agree_with_retry(client, tid, sem, limiter, cooldown, sub, delay):
+    """点赞；3280004（操作太频繁）退避后重试。
+
+    L4：退避等待放在信号量**外面**，并写进全局冷却窗 ``cooldown``：撞一次之后
+    所有任务都先等冷却过去，而不是每个任务各拿一个并发槽睡觉。
+    L6：每次撞限流都把令牌桶速率砍半（``limiter.slow_down``），避免连环撞。
+    """
     last_err = None
     for attempt in range(_LIKE_RETRIES + 1):
+        wait = cooldown["until"] - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        await limiter.acquire()
+        await sem.acquire()
         try:
-            resp = await client.agree(tid)
+            if attempt == 0:
+                sleep_started = _now_ms()
+                try:
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                finally:
+                    _phase_add(sub, PHASE_SLEEP, sleep_started)
+            agree_started = _now_ms()
+            try:
+                resp = await client.agree(tid)
+            finally:
+                _phase_add(sub, PHASE_AGREE, agree_started)
         except Exception as exc:  # noqa: BLE001
             return None, exc
+        finally:
+            sem.release()
         err = getattr(resp, "err", None)
         if err is None:
             return resp, None
         last_err = err
-        if tieba_codes.parse_code(getattr(err, "code", None)) != _RL_CODE \
-                or attempt >= _LIKE_RETRIES:
+        code = tieba_codes.parse_code(getattr(err, "code", None))
+        if code != _RL_CODE or attempt >= _LIKE_RETRIES:
             return resp, err
-        await asyncio.sleep(5 if attempt == 0 else 12)
+        backoff = _RL_BACKOFF[0] if attempt == 0 else _RL_BACKOFF[1]
+        cooldown["until"] = time.monotonic() + backoff
+        limiter.slow_down()
     return None, last_err
 
 
@@ -378,6 +452,24 @@ async def _like_account_async(account, bduss):
     aid = account["id"]
     sub = _sub_for(aid)
     run_started = _now_ms()
+    store = _load()
+    flush = {"changes": 0}
+
+    def _flush():
+        try:
+            _save(store)
+        except Exception:  # noqa: BLE001 - 落盘失败不能打断点赞
+            pass
+
+    def _record(*args, **kwargs):
+        # L1/L2：内存累积；每 _FLUSH_EVERY 个 ok 变化落盘一次，结束再落一次。
+        changed = _record_forum(store, *args, **kwargs)
+        if changed:
+            flush["changes"] += 1
+            if flush["changes"] % _FLUSH_EVERY == 0:
+                _flush()
+        return changed
+
     try:
         async with aiotieba.Client(bduss) as client:
             list_started = _now_ms()
@@ -393,7 +485,11 @@ async def _like_account_async(account, bduss):
                 _update_account(aid, status="done", step="没有关注的吧")
                 return
 
-            sem = asyncio.Semaphore(max(1, _LIKE_CONCURRENCY))
+            # L3：取帖与点赞分开限流，取帖不会把点赞的槽位占死。
+            fetch_sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
+            like_sem = asyncio.Semaphore(max(1, _LIKE_CONCURRENCY))
+            limiter = _RateLimiter(_LIKE_RATE, _LIKE_BURST)
+            cooldown = {"until": 0.0}
             flags = {"stop": False}
             rng = random.SystemRandom()
 
@@ -405,79 +501,69 @@ async def _like_account_async(account, bduss):
                 if flags["stop"]:
                     _bump(aid, "skipped")
                     return
-                async with sem:
-                    if flags["stop"]:
-                        _bump(aid, "skipped")
-                        return
-                    rec = _get_forum_record(aid, fname)
-                    if rec and rec.get("ok"):
-                        _bump(aid, "skipped")
-                        _bump(aid, "checked")
-                        return
-                    fetch_started = _now_ms()
-                    try:
+                rec = _get_forum_record(store, aid, fname)
+                if rec and rec.get("ok"):
+                    _bump(aid, "skipped")
+                    _bump(aid, "checked")
+                    return
+                fetch_started = _now_ms()
+                try:
+                    async with fetch_sem:
                         threads = await client.get_threads(fname, pn=1,
                                                            rn=_RN)
-                    except Exception as exc:  # noqa: BLE001
-                        info = _describe(exc)
-                        _add_failure(sub, fname, info)
-                        _bump(aid, "failed")
-                        _bump(aid, "checked")
-                        return
-                    finally:
-                        _phase_add(sub, PHASE_FETCH, fetch_started)
-                    terr = getattr(threads, "err", None)
-                    if terr is not None:
-                        info = _describe(terr)
-                        _add_failure(sub, fname, info)
-                        if info["category"] == tieba_codes.CAT_ACCOUNT:
-                            flags["stop"] = True
-                        _bump(aid, "failed")
-                        _bump(aid, "checked")
-                        return
-                    pool = [t for t in threads
-                            if int(getattr(t, "tid", 0) or 0)
-                            and not bool(getattr(t, "is_top", False))
-                            and not bool(getattr(t, "is_hide", False))]
-                    if not pool:
-                        _bump(aid, "skipped")
-                        _bump(aid, "checked")
-                        return
-                    thread = rng.choice(pool)
-                    tid = int(thread.tid)
-                    title = str(getattr(thread, "title", "") or "")
-                    # 点赞接口对频率很敏感：每次请求前停一小段，
-                    # 3280004 再退避重试（见 _agree_with_retry）。
-                    sleep_started = _now_ms()
-                    try:
-                        await asyncio.sleep(rng.uniform(*_LIKE_DELAY))
-                    finally:
-                        _phase_add(sub, PHASE_SLEEP, sleep_started)
-                    agree_started = _now_ms()
-                    try:
-                        resp, err = await _agree_with_retry(client, tid)
-                    finally:
-                        _phase_add(sub, PHASE_AGREE, agree_started)
-                    if err is not None:
-                        info = _describe(err)
-                        _add_failure(sub, fname, info)
-                        _record_forum(aid, fname, False, tid, title,
-                                      info["code"], info["reason"],
-                                      info["advice"], info["detail"],
-                                      info["raw"])
-                        if info["category"] == tieba_codes.CAT_ACCOUNT:
-                            flags["stop"] = True
-                        if info["code"] == _RL_CODE:
-                            flags["rate_limited"] = flags.get(
-                                "rate_limited", 0) + 1
-                            if flags["rate_limited"] >= 3:
-                                flags["stop"] = True
-                        _bump(aid, "failed")
-                        _bump(aid, "checked")
-                        return
-                    _record_forum(aid, fname, True, tid, title)
-                    _bump(aid, "success")
+                except Exception as exc:  # noqa: BLE001
+                    info = _describe(exc)
+                    _add_failure(sub, fname, info)
+                    _bump(aid, "failed")
                     _bump(aid, "checked")
+                    return
+                finally:
+                    _phase_add(sub, PHASE_FETCH, fetch_started)
+                terr = getattr(threads, "err", None)
+                if terr is not None:
+                    info = _describe(terr)
+                    _add_failure(sub, fname, info)
+                    if info["category"] == tieba_codes.CAT_ACCOUNT:
+                        flags["stop"] = True
+                    _bump(aid, "failed")
+                    _bump(aid, "checked")
+                    return
+                pool = [t for t in threads
+                        if int(getattr(t, "tid", 0) or 0)
+                        and not bool(getattr(t, "is_top", False))
+                        and not bool(getattr(t, "is_hide", False))]
+                if not pool:
+                    _bump(aid, "skipped")
+                    _bump(aid, "checked")
+                    return
+                thread = rng.choice(pool)
+                tid = int(thread.tid)
+                title = str(getattr(thread, "title", "") or "")
+                # 点赞接口对频率很敏感：首次请求前停一小段，限流退避见
+                # _agree_with_retry（冷却窗在信号量外面）。
+                resp, err = await _agree_with_retry(
+                    client, tid, like_sem, limiter, cooldown, sub,
+                    rng.uniform(*_LIKE_DELAY))
+                if err is not None:
+                    info = _describe(err)
+                    _add_failure(sub, fname, info)
+                    _record(aid, fname, False, tid, title,
+                            info["code"], info["reason"],
+                            info["advice"], info["detail"],
+                            info["raw"])
+                    if info["category"] == tieba_codes.CAT_ACCOUNT:
+                        flags["stop"] = True
+                    if info["code"] == _RL_CODE:
+                        flags["rate_limited"] = flags.get(
+                            "rate_limited", 0) + 1
+                        if flags["rate_limited"] >= 3:
+                            flags["stop"] = True
+                    _bump(aid, "failed")
+                    _bump(aid, "checked")
+                    return
+                _record(aid, fname, True, tid, title)
+                _bump(aid, "success")
+                _bump(aid, "checked")
 
             like_started = _now_ms()
             try:
@@ -492,4 +578,5 @@ async def _like_account_async(account, bduss):
     finally:
         # 当天点过的吧重跑会直接 skip，只有隔天首跑的数据才能证明提速；
         # 所以分段耗时必须落进 tiebasign_like.json，不能只在内存里。
-        _persist_last_run(sub, _now_ms() - run_started)
+        _note_last_run(store, sub, _now_ms() - run_started)
+        _flush()
