@@ -29,6 +29,16 @@ v0.6.0 P0（优化清单第 2 节）:
     * 错误分类统一走 ``app/errors.py``；错误码原样落盘，未收录的码明确写
       「原因不明」，不再冒充「风控」。
 
+v0.6.0 M1（优化清单第 3 节）:
+    * S1：登录只取 ``ReqUInfo.BASIC``，省掉 profile 请求；
+    * S2：补签返回「今天已签到」计入 ``forum_done``，不再算失败；
+    * S3：进度每个吧都刷新，不再 10 个一次；
+    * S4：关注列表第一页之后小批量并行预取（``LIST_PREFETCH_PAGES``）；
+    * S5：随机抖动挪到信号量外面，不占并发槽；
+    * S6：msign 命中风控/验证码时停止逐吧兜底，未知错误仍继续兜底；
+    * S8：多账号一键签到并行，最多 2 个账号同时跑（``ACCOUNT_CONCURRENCY``）。
+      S7 / S10 的并发与速率由 M3 档位统一接管，S9 跨运行复用 Client 暂不做。
+
 All state lives in a module-level dict guarded by _lock; the HTTP layer polls
 GET /api/sign/state. The aiotieba coroutine runs on tieba_api's event loop
 via run_coroutine_threadsafe from a worker thread.
@@ -60,6 +70,10 @@ MAX_FORUM_PAGES = 25  # 25 * 200 = 5000 forums, far beyond realistic usage
 #: 会让短时间内的请求峰值更像脚本。每条请求前随机停 30~150ms 打散节奏。
 SIGN_CONCURRENCY = 4
 SIGN_JITTER = (0.03, 0.15)
+
+#: 关注列表除第一页外，一次并行预取几页（S4）。按每页 200 个吧算：
+#: 2000 个吧 = 10 页，第一页已知后再 2~3 轮就能取完，而不是串行 10 轮。
+LIST_PREFETCH_PAGES = 4
 
 #: 分段耗时（P0-2）的字段名。报告/日志只认这几个 key，别再另起名字。
 PHASE_LOGIN = "login"
@@ -130,10 +144,12 @@ def _new_state(run_id, account):
         "started_at": _now_ms(),
         "finished_at": None,
         "msign": None,          # {"status","category","code","reason","detail"}
+        "fallback_skipped": False,  # S6：msign 撞风控后是否跳过了逐吧补签
         "growth": None,         # 成长等级签到（4.7.1 的 sign_growth）结果
         "forum_total": 0,       # forums that still needed signing
         "forum_checked": 0,
         "forum_success": 0,
+        "forum_done": 0,        # 补签时服务端返回「今天已签到」，不算失败
         "forum_failed": 0,
         "phase_ms": {},         # P0-2 分段耗时：登录 / msign / 列表 / 补签 ...
         "failures": [],         # [{forum,category,code,reason,detail}]
@@ -221,17 +237,6 @@ def _classify_server_error(code, msg):
     return errors.category_for(code, msg)
 
 
-def _err_detail(err):
-    """返回 (code, detail, reason, advice, raw)。
-
-    detail 给普通用户看（人话）；raw 是百度原文，只进日志/报告的技术细节；
-    advice 是「怎么办」。分类规则集中在 ``errors``，这里只选签到侧措辞。
-    """
-    info = errors.classify(err, subject="这次操作")
-    return (info["code"], info["detail"], info["reason"], info["advice"],
-            info["raw"])
-
-
 def _classify_exception(exc):
     return errors.classify(exc)["category"]
 
@@ -256,11 +261,6 @@ def _record_forum_failure(state, fname, err, secret=None):
         state.get("run_id"), item["forum"], item["code"],
         item["category"], item["reason"], item["detail"],
         item["raw"]), secret)
-
-
-def _warn(state, kind, err, secret=None):
-    item = _failure_item(kind, err, secret)
-    state["warnings"].append(item)
 
 
 async def _get_self_info(client):
@@ -335,14 +335,16 @@ async def _sign_forums(client, state, forums, secret=None):
                                   RuntimeError("forum name missing"), secret)
         else:
             try:
+                # S5：抖动放在信号量**外面**。放里面时每条请求都占着并发槽
+                # 睡觉，4 个槽实际只有约 3.2 个在工作；挪出去后槽位不浪费。
+                delay = random.uniform(jitter_lo, jitter_hi)
+                if delay > 0:
+                    sleep_started = _now_ms()
+                    try:
+                        await asyncio.sleep(delay)
+                    finally:
+                        _phase_add(state, PHASE_SIGN_SLEEP, sleep_started)
                 async with sem:
-                    delay = random.uniform(jitter_lo, jitter_hi)
-                    if delay > 0:
-                        sleep_started = _now_ms()
-                        try:
-                            await asyncio.sleep(delay)
-                        finally:
-                            _phase_add(state, PHASE_SIGN_SLEEP, sleep_started)
                     request_started = _now_ms()
                     try:
                         resp = await client.sign_forum(fname)
@@ -352,15 +354,94 @@ async def _sign_forums(client, state, forums, secret=None):
                 if rerr is None:
                     state["forum_success"] += 1
                 else:
-                    _record_forum_failure(state, fname, rerr, secret)
+                    item = _failure_item(fname, rerr, secret)
+                    # S2：服务端说「今天已经签过」不是失败。以前按失败计，
+                    # 失败数虚高，还会让用户以为号被风控。
+                    if item["category"] == tieba_codes.CAT_DONE:
+                        state["forum_done"] += 1
+                        _log("run={} forum={} already_signed code={}".format(
+                            state.get("run_id"), item["forum"],
+                            item["code"]), secret)
+                    else:
+                        _append_failure_in(state, item)
+                        _log("run={} forum={} code={} category={} reason={} "
+                             "detail={} raw={}".format(
+                                 state.get("run_id"), item["forum"],
+                                 item["code"], item["category"],
+                                 item["reason"], item["detail"],
+                                 item["raw"]), secret)
             except Exception as exc:  # noqa: BLE001 - 单个吧失败不拖垮整轮
                 _record_forum_failure(state, fname, exc, secret)
         state["forum_checked"] += 1
-        checked = state["forum_checked"]
-        if checked % 10 == 0 or checked == total:
-            _update_in(state, step="逐吧补签 {}/{}".format(checked, total))
+        # S3：进度每个吧都刷一次。之前 10 个刷一次，几百个吧的界面会卡着
+        # 不动；这里只是内存里的状态更新，没有额外 IO。
+        _update_in(state, step="逐吧补签 {}/{}".format(
+            state["forum_checked"], total))
 
     await asyncio.gather(*(_one(forum) for forum in forums))
+
+
+async def _fetch_follow_page(client, state, secret, pn):
+    """取关注吧列表的一页；出错时把整体状态置为 error 并返回 None。"""
+    page_started = _now_ms()
+    try:
+        res = await client.get_self_follow_forums(pn=pn, rn=200)
+    finally:
+        _phase_add(state, PHASE_LIST, page_started)
+    rerr = getattr(res, "err", None)
+    if rerr is not None:
+        item = _failure_item("获取关注吧列表", rerr, secret)
+        _log("follow list failed pn={} code={} category={} detail={} "
+             "raw={}".format(pn, item["code"], item["category"],
+                             item["detail"], item["raw"]), secret)
+        _update_in(state, status="error", step="获取关注吧列表失败",
+                   finished_at=_now_ms(),
+                   error={"category": item["category"],
+                          "code": item["code"],
+                          "reason": item["reason"],
+                          "advice": item["advice"],
+                          "detail": item["detail"],
+                          "raw": item["raw"]})
+        return None
+    return res
+
+
+async def _fetch_follow_forums(client, state, secret=None):
+    """S4：第一页串行（决定还有没有下一页），之后小批量并行预取。
+
+    以前是一页一页串行取，2000 个吧（10 页）光列表就要 15 秒。现在第一页
+    之后每 4 页并行一次，常见的关注量 2~3 轮取完。每轮可能多取到最多 3 个
+    空页（列表正好在轮中间结束），这是只读请求、风控权重低，换来的是少几轮
+    串行等待。
+    """
+    first = await _fetch_follow_page(client, state, secret, 1)
+    if first is None:
+        return None
+    forums = list(first)
+    if not getattr(first, "has_more", False):
+        return forums
+
+    pn = 2
+    while pn <= MAX_FORUM_PAGES:
+        pages = list(range(pn, min(pn + LIST_PREFETCH_PAGES,
+                                   MAX_FORUM_PAGES + 1)))
+        results = await asyncio.gather(
+            *(_fetch_follow_page(client, state, secret, page)
+              for page in pages))
+        if any(res is None for res in results):
+            return None
+        last_page = pages[-1]
+        for page, res in zip(pages, results):
+            if not getattr(res, "has_more", False):
+                last_page = page
+                break
+        for page, res in zip(pages, results):
+            if page <= last_page:
+                forums.extend(res)
+        if last_page < pages[-1]:
+            break
+        pn = pages[-1] + 1
+    return forums
 
 
 async def _sign_async(state, bduss):
@@ -376,7 +457,10 @@ async def _sign_async(state, bduss):
             # ---- 1. account validity gate --------------------------------
             login_started = _now_ms()
             try:
-                user = await client.get_self_info()
+                # S1：签到只需要「登录态有效 + 拿到 uid」，BASIC 就够了。
+                # ALL 会再多取一次用户资料（profile），白白多一个请求。
+                user = await client.get_self_info(
+                    require=aiotieba.ReqUInfo.BASIC)
             finally:
                 _phase_add(state, PHASE_LOGIN, login_started)
             uerr = getattr(user, "err", None)
@@ -417,55 +501,46 @@ async def _sign_async(state, bduss):
                                          "detail": "网页一键签到成功",
                                          "raw": ""})
             else:
-                code, detail, reason, advice, raw = _err_detail(merr)
-                category = _classify_server_error(
-                    code, str(getattr(merr, "msg", None) or merr))
+                item = _failure_item("网页一键签到(msign)", merr, secret)
                 _update_in(state, msign={"status": "error",
-                                         "category": category,
-                                         "code": code,
-                                         "reason": reason,
-                                         "advice": advice,
-                                         "detail": redact.scrub(detail,
-                                                                secret),
-                                         "raw": redact.scrub(raw, secret)})
-                # msign 失败不算整体失败：后面逐吧补签才是权威结果。
-                _warn(state, "网页一键签到(msign)", merr, secret)
+                                         "category": item["category"],
+                                         "code": item["code"],
+                                         "reason": item["reason"],
+                                         "advice": item["advice"],
+                                         "detail": item["detail"],
+                                         "raw": item["raw"]})
+                # msign 失败本身不算整体失败：后面逐吧补签才是权威结果。
                 _log("msign failed code={} category={} detail={} raw={}".format(
-                    code, category, detail, raw), secret)
+                    item["code"], item["category"], item["detail"],
+                    item["raw"]), secret)
+                if item["category"] in (tieba_codes.CAT_RISK,
+                                        tieba_codes.CAT_CAPTCHA):
+                    # S6：这是清单里唯一会让「签到数变少」的改动。只有确认
+                    # 是风控/验证码才停；未知错误继续逐吧兜底（可能是接口变了）。
+                    # 停止时不再把它塞进 warnings：整体已经 error，页面有错误框，
+                    # 再挂一条「不影响签到结果」的提醒会自相矛盾。
+                    _update_in(
+                        state, status="error",
+                        step="网页一键签到被限制，已停止逐吧补签",
+                        finished_at=_now_ms(),
+                        fallback_skipped=True,
+                        error={"category": item["category"],
+                               "code": item["code"],
+                               "reason": item["reason"],
+                               "advice": item["advice"],
+                               "detail": "网页一键签到被限制，已停止逐吧补签，"
+                                         "避免继续触发风控",
+                               "raw": item["raw"]})
+                    _log("run={} msign blocked ({}) -> skip forum fallback"
+                         .format(state.get("run_id"), item["category"]), secret)
+                    return
+                state["warnings"].append(item)
 
             # ---- 3. enumerate followed forums ----------------------------
             _update_in(state, step="获取关注吧列表")
-            forums = []
-            pn = 1
-            while pn <= MAX_FORUM_PAGES:
-                page_started = _now_ms()
-                try:
-                    res = await client.get_self_follow_forums(pn=pn, rn=200)
-                finally:
-                    _phase_add(state, PHASE_LIST, page_started)
-                rerr = getattr(res, "err", None)
-                if rerr is not None:
-                    item = _failure_item("获取关注吧列表", rerr, secret)
-                    _log("follow list failed pn={} code={} category={} "
-                         "detail={} raw={}".format(pn, item["code"],
-                                                   item["category"],
-                                                   item["detail"],
-                                                   item["raw"]), secret)
-                    _update_in(state, status="error",
-                               step="获取关注吧列表失败",
-                               finished_at=_now_ms(),
-                               error={"category": item["category"],
-                                      "code": item["code"],
-                                      "reason": item["reason"],
-                                      "advice": item["advice"],
-                                      "detail": item["detail"],
-                                      "raw": item["raw"]})
-                    return
-                for forum in res:
-                    forums.append(forum)
-                if not getattr(res, "has_more", False):
-                    break
-                pn += 1
+            forums = await _fetch_follow_forums(client, state, secret)
+            if forums is None:
+                return
 
             to_sign = [f for f in forums if not bool(getattr(f, "is_signed",
                                                              False))]
@@ -483,9 +558,10 @@ async def _sign_async(state, bduss):
 
             _update_in(state, status="done", step="签到完成",
                        finished_at=_now_ms())
-            _log("run={} done success={} failed={} warnings={} elapsed_ms={} "
-                 "phase_ms={}".format(
+            _log("run={} done success={} done={} failed={} warnings={} "
+                 "elapsed_ms={} phase_ms={}".format(
                      state.get("run_id"), state.get("forum_success"),
+                     state.get("forum_done"),
                      state.get("forum_failed"),
                      len(state.get("warnings") or []),
                      (state.get("finished_at") or _now_ms())
@@ -540,10 +616,12 @@ def _snapshot_for_report(state):
                 "status": sub.get("status"),
                 "step": sub.get("step"),
                 "msign": sub.get("msign"),
+                "fallback_skipped": sub.get("fallback_skipped"),
                 "growth": sub.get("growth"),
                 "forum_total": sub.get("forum_total"),
                 "forum_checked": sub.get("forum_checked"),
                 "forum_success": sub.get("forum_success"),
+                "forum_done": sub.get("forum_done"),
                 "forum_failed": sub.get("forum_failed"),
                 "phase_ms": dict(sub.get("phase_ms") or {}),
                 "failures": list(sub.get("failures") or [])[:_REPORT_FAILURES_MAX],
@@ -559,10 +637,12 @@ def _snapshot_for_report(state):
             "account_name": state.get("account_name"),
             "account_mask": state.get("account_mask"),
             "msign": state.get("msign"),
+            "fallback_skipped": state.get("fallback_skipped"),
             "growth": state.get("growth"),
             "forum_total": state.get("forum_total"),
             "forum_checked": state.get("forum_checked"),
             "forum_success": state.get("forum_success"),
+            "forum_done": state.get("forum_done"),
             "forum_failed": state.get("forum_failed"),
             "failures": list(state.get("failures") or [])[:_REPORT_FAILURES_MAX],
             "warnings": list(state.get("warnings") or [])[:_REPORT_WARNINGS_MAX],
@@ -592,11 +672,13 @@ def load_last_report():
         return None
 
 
-def _fmt_msign(msign):
+def _fmt_msign(msign, fallback_skipped=False):
     if not msign:
         return None
     if msign.get("status") == "success":
         return "网页一键签到：成功"
+    if fallback_skipped:
+        return "网页一键签到：没成功（命中风控类错误），已停止逐吧补签"
     return "网页一键签到：没成功，已改为逐个吧补签"
 
 
@@ -678,14 +760,20 @@ def _report_lines_for_account(label, acct):
     growth = _fmt_growth(acct.get("growth"))
     if growth:
         lines.append("  " + growth)
-    msign = _fmt_msign(acct.get("msign"))
+    msign = _fmt_msign(acct.get("msign"), acct.get("fallback_skipped"))
     if msign:
         lines.append("  " + msign)
-    if acct.get("forum_total") is not None:
-        lines.append("  补签：检查 {} / 成功 {} / 失败 {}".format(
-            acct.get("forum_total") or 0,
+    if acct.get("fallback_skipped"):
+        lines.append("  补签：未执行（网页一键签到命中风控，已停止逐吧补签）")
+    elif acct.get("forum_total") is not None:
+        line = "  补签：检查 {} / 成功 {} / 失败 {}".format(
+            acct.get("forum_checked") or 0,
             acct.get("forum_success") or 0,
-            acct.get("forum_failed") or 0))
+            acct.get("forum_failed") or 0)
+        done = acct.get("forum_done") or 0
+        if done:
+            line += " / 已签到 {}（不计失败）".format(done)
+        lines.append(line)
     phase_lines = _fmt_phase_ms(acct.get("phase_ms"))
     for phase_line in phase_lines:
         lines.append("  " + phase_line)
@@ -767,8 +855,32 @@ def _update_account(account_id, **kwargs):
                 return
 
 
+#: 多账号一键签到最多同时跑几个账号（S8）。账号之间是独立 Client，并行不会
+#: 让单个账号的请求更密；2 是 3 个账号 2 分钟 → 40 秒的折中，不写死更大值。
+ACCOUNT_CONCURRENCY = 2
+ACCOUNT_TIMEOUT_SEC = 900
+
+
+def _account_timeout_error():
+    return {"category": tieba_codes.CAT_NETWORK, "code": None, "reason": None,
+            "detail": "签到超过 15 分钟仍未完成，已停止等待"}
+
+
+def _mark_account_done(batch, sub):
+    with _lock:
+        if sub.get("status") not in ("done", "error"):
+            sub.update(status="error", step="签到中断",
+                       finished_at=_now_ms(),
+                       error={"category": tieba_codes.CAT_UNKNOWN,
+                              "code": None, "reason": None,
+                              "detail": "签到线程异常结束"})
+        batch["account_done"] += 1
+        batch["step"] = "账号进度 {}/{}".format(
+            batch["account_done"], batch["account_total"])
+
+
 def start_multi(pairs):
-    """Start one run per (account, bduss) pair, sequentially.
+    """Start one run per (account, bduss) pair, at most 2 accounts at once.
 
     pairs: [(account_dict, bduss_str), ...] -- bduss lives only in this
     call frame / the coroutine, never in state snapshots.
@@ -787,44 +899,61 @@ def start_multi(pairs):
 
     def _worker():
         loop = tieba_api._ensure_loop()
-        for idx, (account, bduss) in enumerate(pairs):
+
+        async def _run_all():
+            gate = asyncio.Semaphore(ACCOUNT_CONCURRENCY)
+
+            async def _one(sub, bduss):
+                async with gate:
+                    _update_account(sub["account_id"], status="running",
+                                    step="准备中")
+                    try:
+                        await asyncio.wait_for(
+                            _sign_async(sub, bduss),
+                            timeout=ACCOUNT_TIMEOUT_SEC)
+                    except asyncio.TimeoutError:
+                        sub.update(status="error", step="签到超时",
+                                   finished_at=_now_ms(),
+                                   error=_account_timeout_error())
+                    except Exception as exc:  # noqa: BLE001
+                        sub.update(status="error", step="签到异常",
+                                   finished_at=_now_ms(),
+                                   error={
+                                       "category": _classify_exception(exc),
+                                       "code": None, "reason": None,
+                                       "detail": "{}: {}".format(
+                                           type(exc).__name__, exc)})
+                    _mark_account_done(batch, sub)
+
+            await asyncio.gather(*(_one(sub, bduss) for sub, (_acct, bduss)
+                                   in zip(batch["accounts"], pairs)))
             with _lock:
-                sub = batch["accounts"][idx] if batch is not None else None
-            if sub is None:
-                break
-            _update_account(account["id"], status="running",
-                            step="准备中")
-            future = asyncio.run_coroutine_threadsafe(
-                _sign_async(sub, bduss), loop)
-            try:
-                future.result(timeout=900)
-            except asyncio.TimeoutError:
-                sub.update(status="error", step="签到超时",
-                           finished_at=_now_ms(),
-                           error={"category": tieba_codes.CAT_NETWORK, "code": None,
-                                  "reason": None,
-                                  "detail": "签到超过 15 分钟仍未完成，"
-                                            "已停止等待"})
-            except Exception as exc:  # noqa: BLE001
-                sub.update(status="error", step="签到异常",
-                           finished_at=_now_ms(),
-                           error={"category": _classify_exception(exc),
-                                  "code": None, "reason": None,
-                                  "detail": "{}: {}".format(
-                                      type(exc).__name__, exc)})
+                batch["status"] = "done"
+                batch["step"] = "全部账号签到完成"
+                batch["finished_at"] = _now_ms()
+            _persist_report(batch)
+
+        future = asyncio.run_coroutine_threadsafe(_run_all(), loop)
+        ceiling = (ACCOUNT_TIMEOUT_SEC
+                   * ((len(pairs) + ACCOUNT_CONCURRENCY - 1)
+                      // ACCOUNT_CONCURRENCY) + 120)
+        try:
+            future.result(timeout=ceiling)
+        except Exception as exc:  # noqa: BLE001 - 线程兜底：不再无限等待
             with _lock:
-                if sub.get("status") not in ("done", "error"):
-                    sub.update(status="error", step="签到中断",
-                               error={"category": tieba_codes.CAT_UNKNOWN, "code": None,
-                                      "reason": None,
-                                      "detail": "签到线程异常结束"})
-                batch["account_done"] += 1
-                batch["step"] = "账号进度 {}/{}".format(
-                    batch["account_done"], batch["account_total"])
-        batch["status"] = "done"
-        batch["step"] = "全部账号签到完成"
-        batch["finished_at"] = _now_ms()
-        _persist_report(batch)
+                for sub in batch["accounts"]:
+                    if sub.get("status") in ("pending", "running"):
+                        sub.update(status="error", step="签到异常",
+                                   finished_at=_now_ms(),
+                                   error={
+                                       "category": _classify_exception(exc),
+                                       "code": None, "reason": None,
+                                       "detail": "签到线程异常：{}: {}".format(
+                                           type(exc).__name__, exc)})
+                batch["status"] = "done"
+                batch["step"] = "全部账号签到完成"
+                batch["finished_at"] = _now_ms()
+            _persist_report(batch)
 
     threading.Thread(target=_worker, name="tieba-sign-multi-worker",
                      daemon=True).start()

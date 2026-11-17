@@ -2335,13 +2335,21 @@ function renderSingle(s){
   if(s.msign){
     var m=s.msign;
     var color=(m.status==='success')?'#0BA36B':(CAT_COLOR[m.category]||'#E5484D');
+    var msignText=m.status==='success'?'成功':
+      (s.fallback_skipped?'没成功（命中风控类错误），已停止逐吧补签':
+       '没成功，已改为逐个吧补签');
     html+='<div class="hint" style="color:'+color+';font-weight:700;margin-top:8px">'+
-      '网页一键签到：'+(m.status==='success'?'成功':
-      '没成功，已改为逐个吧补签')+'</div>';
+      '网页一键签到：'+msignText+'</div>';
   }
   html+=growthLine(s.growth);
   if(s.status==='done'){
     html+='<div style="display:flex;gap:10px;margin-top:14px">';
+    if(s.forum_done>0){
+      html+='<div style="flex:1;text-align:center;background:rgba(232,147,12,.12);'+
+        'border-radius:12px;padding:12px">'+
+        '<div style="font-size:22px;font-weight:700;color:#E8930C">'+
+        s.forum_done+'</div><div style="font-size:12px;color:#5B6270">已签到</div></div>';
+    }
     html+='<div style="flex:1;text-align:center;background:rgba(11,163,107,.12);'+
       'border-radius:12px;padding:12px">'+
       '<div style="font-size:22px;font-weight:700;color:#0BA36B">'+
@@ -2352,7 +2360,9 @@ function renderSingle(s){
       s.forum_failed+'</div><div style="font-size:12px;color:#5B6270">补签失败</div></div>';
     html+='</div>';
     html+='<div class="hint" style="margin-top:10px">签到完成，共检查 '+
-      s.forum_total+' 个待签吧。</div>';
+      s.forum_total+' 个待签吧'+
+      (s.forum_done>0?'；其中 '+s.forum_done+' 个今天已签到，不计入失败':'')+
+      '。</div>';
   }
   if(s.status==='error'){
     var e=s.error||{};
@@ -2383,11 +2393,12 @@ function renderMulti(s){
   var done=s.account_done||0;
   var total=s.account_total||(s.accounts?s.accounts.length:0);
   html+='<div class="hint">账号进度 '+done+' / '+total+'</div>';
-  var aggS=0,aggF=0,allFails=[],allWarnings=[];
+  var aggS=0,aggF=0,aggD=0,allFails=[],allWarnings=[];
   if(s.accounts){
     for(var i=0;i<s.accounts.length;i++){
       var a=s.accounts[i];
       aggS+=(a.forum_success||0); aggF+=(a.forum_failed||0);
+      aggD+=(a.forum_done||0);
       var st=acctStatus(a);
       html+='<div style="border-bottom:1px solid rgba(127,127,127,.18);padding:12px 0">';
       html+='<div style="display:flex;justify-content:space-between;align-items:center">'+
@@ -2406,14 +2417,18 @@ function renderMulti(s){
       if(a.msign){
         var m=a.msign;
         var mc=(m.status==='success')?'#0BA36B':(CAT_COLOR[m.category]||'#E5484D');
+        var msignText=m.status==='success'?'成功':
+          (a.fallback_skipped?'没成功（命中风控类错误），已停止逐吧补签':
+           '没成功，已改为逐个吧补签');
         html+='<div class="hint" style="color:'+mc+';font-weight:700;margin-top:6px">'+
-          '网页一键签到：'+(m.status==='success'?'成功':
-          '没成功，已改为逐个吧补签')+'</div>';
+          '网页一键签到：'+msignText+'</div>';
       }
       html+=growthLine(a.growth);
       if(a.status==='done'){
         html+='<div class="hint" style="margin-top:6px">补签成功 '+
-          (a.forum_success||0)+' · 补签失败 '+(a.forum_failed||0)+'</div>';
+          (a.forum_success||0)+' · 补签失败 '+(a.forum_failed||0)+
+          ((a.forum_done||0)>0?' · 已签到 '+(a.forum_done||0)+'（不计失败）':'')+
+          '</div>';
       }
       if(a.status==='error'){
         var e=a.error||{};
@@ -2443,6 +2458,12 @@ function renderMulti(s){
   }
   if(s.status==='done'){
     html+='<div style="display:flex;gap:10px;margin-top:14px">';
+    if(aggD>0){
+      html+='<div style="flex:1;text-align:center;background:rgba(232,147,12,.12);'+
+        'border-radius:12px;padding:12px">'+
+        '<div style="font-size:22px;font-weight:700;color:#E8930C">'+aggD+
+        '</div><div style="font-size:12px;color:#5B6270">已签到</div></div>';
+    }
     html+='<div style="flex:1;text-align:center;background:rgba(11,163,107,.12);'+
       'border-radius:12px;padding:12px">'+
       '<div style="font-size:22px;font-weight:700;color:#0BA36B">'+aggS+

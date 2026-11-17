@@ -166,6 +166,9 @@ def page_content_checks():
     check("签到报告页说明已脱敏", "BDUSS" in report_html and "掩码" in report_html)
     check("签到页 JS 展示成长等级签到", "成长等级签到" in main._JS_SIGN)
     check("签到页 JS 展示错误码", "错误码" in main._JS_SIGN)
+    check("签到页 JS 展示已签到数（不计失败）", "已签到" in main._JS_SIGN)
+    check("签到页 JS 区分「风控即停」文案",
+          "已停止逐吧补签" in main._JS_SIGN)
     check("签到页 JS 用「原因」和「怎么办」说人话",
           "原因：" in main._JS_SIGN and "怎么办：" in main._JS_SIGN)
     check("签到页 JS 有提醒区（warnings）", "warningsCard" in main._JS_SIGN)

@@ -412,6 +412,7 @@ def _finalize(account, state):
     warnings = list(state.get("warnings") or [])
     failed = int(state.get("forum_failed") or 0)
     success = int(state.get("forum_success") or 0)
+    done = int(state.get("forum_done") or 0)
 
     # msign 只是「批量快捷方式」：它失败后还会逐吧补签，补签成功就是成功。
     # v0.5.0 之前这里把 msign 失败直接算成整体失败，导致「所有吧都签到了
@@ -445,6 +446,7 @@ def _finalize(account, state):
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "ok": bool(ok),
         "success": int(success),
+        "done": int(done),
         "failed": int(failed),
         "failures": failures[:50],
         "warnings": warnings[:50],
@@ -474,6 +476,9 @@ def _notify_text(account, snapshot):
     name = account.get("name") or "贴吧账号"
     parts.append("账号「{}」自动签到：成功 {}，失败 {}".format(
         name, snapshot["success"], snapshot["failed"]))
+    if snapshot.get("done"):
+        parts.append("另有 {} 个吧今天已签到（不计失败）".format(
+            snapshot["done"]))
     shown = []
     for f in snapshot["failures"][:3]:
         detail = f.get("detail") or "百度没有给出具体原因"
