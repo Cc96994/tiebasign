@@ -392,19 +392,15 @@ def test_tier_settings():
         st = liker.save_settings({"level": 2})
         check("点赞档位可保存到激进", st["level"] == 2, st)
         check("点赞设置页能读回激进", liker.get_settings()["level"] == 2)
-        try:
-            liker.save_settings({"level": 5})
-            rejected = False
-        except ValueError:
-            rejected = True
-        check("红档未解锁时拒绝保存", rejected)
+        st = liker.save_settings({"level": 5})
+        check("点赞档位可保存到危险+",
+              st["level"] == 5 and st["like_concurrency"] == 18, st)
         data = liker._load()
         data["level"] = 99
         liker._save(data)
         st = liker.get_settings()
         check("手改 level=99 压回 5（stored）",
-              st["stored_level"] == 5, st)
-        check("红档未解锁时实际按极速（3）运行", st["level"] == 3, st)
+              st["stored_level"] == 5 and st["level"] == 5, st)
         liker.save_settings({"level": 1})
     finally:
         tiers.get = _TEST_TIER

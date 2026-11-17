@@ -509,6 +509,60 @@ def test_follow_pages_prefetch():
           client2.calls)
 
 
+def test_hard_stop_and_breaker():
+    """M3b：验证码/登录问题硬停；限流熔断降档后继续。"""
+    # 验证码 -> 硬停，剩余不签
+    reset_files()
+    forums = [FakeForum("cap")] + [FakeForum("ok{}".format(i))
+                                   for i in range(11)]
+    behavior = {"cap": FakeErr(4, "")}
+    state, client = asyncio.run(run_sign(forums, behavior))
+    check("验证码 -> 整体 error", state["status"] == "error",
+          state["status"])
+    check("验证码 -> hard_stopped 有记录",
+          bool(state.get("hard_stopped")), state.get("hard_stopped"))
+    check("验证码 -> 跳过了一些吧", state["forum_skipped"] > 0,
+          state["forum_skipped"])
+    check("验证码 -> 实际请求少于总数",
+          sum(1 for c in client.calls if c[0] == "sign_forum") < 12,
+          client.calls)
+    check("验证码 -> 错误文案说明停止",
+          "停止剩余补签" in (state["error"]["detail"] or ""), state["error"])
+
+    # 限流 -> 熔断降到保守档，继续跑完剩下的吧
+    reset_files()
+    forums = [FakeForum("rl")] + [FakeForum("ok{}".format(i))
+                                  for i in range(11)]
+    behavior = {"rl": FakeErr(340011, "")}
+    state2, _client2 = asyncio.run(run_sign(forums, behavior))
+    check("限流 -> 不判整体失败", state2["status"] == "done",
+          state2["status"])
+    check("限流 -> 记录熔断降档", bool(state2.get("breaker")),
+          state2.get("breaker"))
+    check("限流 -> 熔断目标档=保守",
+          state2["breaker"]["to_level"] == 0, state2["breaker"])
+    check("限流 -> 其余 11 个吧继续完成",
+          state2["forum_checked"] == 12 and state2["forum_success"] == 11,
+          (state2["forum_checked"], state2["forum_success"]))
+    check("限流 -> 用户档位不变", signer.get_settings()["level"] == 1)
+    check("限流 -> 报告写明自动降速",
+          "已自动降到「保守」档" in signer.report_text())
+
+    # 保守档仍被限流 -> 硬停
+    signer.save_settings({"level": 0})
+    reset_files()
+    forums = [FakeForum("rl")] + [FakeForum("ok{}".format(i))
+                                  for i in range(7)]
+    state3, _client3 = asyncio.run(run_sign(
+        forums, {"rl": FakeErr(340011, "")}))
+    check("保守档仍限流 -> 硬停 error", state3["status"] == "error",
+          state3["status"])
+    check("保守档仍限流 -> 说明原因",
+          "保守档仍然被限流" in (state3["error"]["detail"] or ""),
+          state3.get("error"))
+    signer.save_settings({"level": 1})
+
+
 def test_multi_accounts_parallel():
     """S8：多账号并行，闸门最多 2 个账号同时跑。"""
     import time as _time
@@ -676,6 +730,8 @@ def test_tier_settings():
 
     reset_files()
     check("档位表有 6 档", len(tiers.TIERS) == 6)
+    check("红档已解锁（M3b）",
+          tiers.RED_UNLOCKED is True and tiers.max_open_level() == 5)
     check("颜色按 蓝/蓝/黄/黄/红/红",
           [t.color for t in tiers.TIERS] ==
           ["blue", "blue", "amber", "amber", "red", "red"],
@@ -697,19 +753,19 @@ def test_tier_settings():
     st = signer.save_settings({"level": 0})
     check("签到档位可保存到保守",
           st["level"] == 0 and st["sign_concurrency"] == 2, st)
-    try:
-        signer.save_settings({"level": 5})
-        rejected = False
-    except ValueError:
-        rejected = True
-    check("红档未解锁时拒绝保存", rejected)
-    # 手改配置 99：clamp 到 5，但 0.6.0 红档未解锁，实际按极速（3）运行
+    check("红档已解锁（max_open=5）",
+          signer.get_settings()["max_open_level"] == 5)
+    st = signer.save_settings({"level": 5})
+    check("签到档位可保存到危险+",
+          st["level"] == 5 and st["sign_concurrency"] == 16, st)
+    # 手改配置 99：clamp 到 5 -> 显示危险+（清单 5.6 验收）
     with open(signer._data_path(signer._SETTINGS_FILENAME), "w",
               encoding="utf-8") as fh:
         json.dump({"level": 99}, fh)
     st = signer.get_settings()
-    check("手改 level=99 压回危险+", st["stored_level"] == 5, st)
-    check("红档未解锁时实际按极速运行", st["level"] == 3, st)
+    check("手改 level=99 压回危险+",
+          st["stored_level"] == 5 and st["level"] == 5
+          and st["name"] == "危险+", st)
 
     # 档位 0（并发 2）要真的限制住并写进运行状态
     signer.save_settings({"level": 0})
@@ -728,6 +784,7 @@ def main():
     print("== 签到主流程 =="); test_signer_flow()
     print("== msign 警告 =="); test_msign_warning()
     print("== msign 风控即停（S6） =="); test_msign_risk_stop()
+    print("== 硬停与熔断（M3b） =="); test_hard_stop_and_breaker()
     print("== 账号入口 =="); test_account_gate_failure()
     print("== 网络分类 =="); test_network_error_category()
     print("== 关注列表并行预取（S4） =="); test_follow_pages_prefetch()

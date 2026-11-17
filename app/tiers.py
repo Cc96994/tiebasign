@@ -5,9 +5,9 @@
 滑块颜色都从这张表读；界面和存储只存 ``{"level": N}`` 这个意图，不存裸数字。
 以后换令牌桶 / AIMD 自适应时只改这张表。
 
-0.6.0（M3a）只开放 level 0–3；level 4/5 要等 M3b 的硬停 + 熔断降档一起上，
-现在 ``RED_UNLOCKED = False``：服务端拒绝保存红档，界面上红区是灰的、松手会
-弹回「极速」。
+0.6.0（M3a/M3b）：level 0–5 全部开放。危险档 4/5 依赖 M3b 的硬停 +
+熔断降档 + 二次确认，三者都在本版本里；``RED_UNLOCKED`` 保留成开关，
+回滚到只开放 0–3 时改成 False 即可（服务端会拒绝保存红档）。
 
 读取必须 clamp（``max(0, min(5, int(raw)))``）：手改配置文件写成 99 也不能崩，
 要压回上限而不是信它。
@@ -17,9 +17,9 @@ import collections
 
 TIER_COUNT = 6
 DEFAULT_LEVEL = 1
-#: 0.6.0 只开放到「极速」；M3b 解锁后把 RED_UNLOCKED 改成 True。
+#: 未解锁时只开放到「极速」；0.6.0 已解锁红档。
 MAX_OPEN_LEVEL = 3
-RED_UNLOCKED = False
+RED_UNLOCKED = True
 
 Tier = collections.namedtuple(
     "Tier", "level name icon sign_concurrency like_concurrency "
@@ -50,7 +50,7 @@ def get(level):
 
 
 def max_open_level():
-    """当前版本允许保存的最高档位（红档未解锁时是 3）。"""
+    """当前版本允许保存的最高档位（红档未解锁时是 3，0.6.0 是 5）。"""
     return TIER_COUNT - 1 if RED_UNLOCKED else MAX_OPEN_LEVEL
 
 

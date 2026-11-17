@@ -567,7 +567,9 @@ async def _like_account_async(account, bduss):
                 if terr is not None:
                     info = _describe(terr)
                     _add_failure(sub, fname, info)
-                    if info["category"] == tieba_codes.CAT_ACCOUNT:
+                    if info["category"] in (tieba_codes.CAT_ACCOUNT,
+                                            tieba_codes.CAT_CAPTCHA):
+                        # M3b 硬停：登录问题或验证码，继续点只会撞墙。
                         flags["stop"] = True
                     _bump(aid, "failed")
                     _bump(aid, "checked")
@@ -595,7 +597,8 @@ async def _like_account_async(account, bduss):
                             info["code"], info["reason"],
                             info["advice"], info["detail"],
                             info["raw"])
-                    if info["category"] == tieba_codes.CAT_ACCOUNT:
+                    if info["category"] in (tieba_codes.CAT_ACCOUNT,
+                                            tieba_codes.CAT_CAPTCHA):
                         flags["stop"] = True
                     if info["code"] == _RL_CODE:
                         flags["rate_limited"] = flags.get(

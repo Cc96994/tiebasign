@@ -201,6 +201,10 @@ def page_content_checks():
           and "type='range'" in sign_tier_page
           and "<details" in sign_tier_page
           and "风险提示" in sign_tier_page, sign_tier_page[:200])
+    check("红档有二次确认对话框",
+          "id='tier_confirm_sign'" in sign_tier_page
+          and "确定使用" in sign_tier_page
+          and "tier_cancel_sign" in sign_tier_page, sign_tier_page[:200])
     like_tier_page = main._page_settings_like()
     check("随机点赞设置页有速度滑块",
           "id='tier_like'" in like_tier_page
@@ -345,15 +349,18 @@ def http_checks():
               status == 200 and body["ok"] is True
               and body["settings"]["level"] == 2, body)
         status, body = post("/api/sign/settings", {"level": 5})
-        check("签到红档未解锁时被拒",
-              status == 200 and body["ok"] is False, body)
+        check("签到红档已解锁、可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["level"] == 5
+              and body["settings"]["sign_concurrency"] == 16, body)
         status, body = post("/api/like/settings", {"level": 0})
         check("点赞档位可保存到保守",
               status == 200 and body["ok"] is True
               and body["settings"]["level"] == 0, body)
         status, body = post("/api/like/settings", {"level": 4})
-        check("点赞红档未解锁时被拒",
-              status == 200 and body["ok"] is False, body)
+        check("点赞红档已解锁、可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["level"] == 4, body)
         post("/api/sign/settings", {"level": 1})
         post("/api/like/settings", {"level": 1})
         status, body = get("/api/update/state")

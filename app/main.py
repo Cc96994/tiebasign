@@ -616,6 +616,10 @@ def _page_settings():
             update_label = "检查更新 · 发现 v{}".format(latest["version"])
     except Exception:  # noqa: BLE001
         pass
+    try:
+        app_version = updater.get_settings()["current"]["version"]
+    except Exception:  # noqa: BLE001 - 读不到版本也不能让设置页崩
+        app_version = "?"
     body = (
         "<div class='topbar'>设置</div><main>"
         "<div class='card'><a class='menu-item' href='/settings/update'>"
@@ -634,10 +638,12 @@ def _page_settings():
         "<a class='menu-item' href='/settings/like'>"
         "<span>随机点赞设置</span><span class='arrow'>›</span></a>"
         "</div>"
-        "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.5.6 · aiotieba 4.7.1<br>"
-        "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
-        "</div></main>"
+        + (
+            "<div class='card'><div class='title'>关于</div>"
+            "<div class='hint'>贴吧签到助手 {} · aiotieba 4.7.1<br>"
+            "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
+            "</div></main>"
+        ).format(html.escape(app_version))
     )
     return _page("设置", body, "settings", dot=autosign.dot_pending(),
                  update_dot=_update_dot())
@@ -824,59 +830,72 @@ def _tier_labels():
 
 
 def _tier_section(kind, st):
-    """速度档位滑块（M3a / D6–D8）。kind: sign | like。"""
+    """速度档位滑块（M3a/M3b，D6–D8）。kind: sign | like。"""
     level = int(st.get("level") or 0)
-    max_open = int(st.get("max_open_level") or 3)
     tier = tiers.get(level)
     metas = [_tier_meta(kind, t) for t in tiers.TIERS]
     labels = _tier_labels()
-    locked = " locked" if not st.get("red_unlocked") else ""
-    note = ""
-    if not st.get("red_unlocked"):
-        note = ("危险档（4–5）在 0.6.0 只做展示、不能保存：需要先有硬停和"
-                "熔断降档，计划 0.6.1 解锁。")
     return (
         "<div class='card'><div class='title'>{}速度档位</div>"
         "<div class='hint'>档位调的是<b>速度</b>，不是成功率；越高越容易被"
-        "百度限流，可能导致当天部分吧签不上。</div>"
+        "百度限流，可能导致当天部分吧签不上。危险档会先弹二次确认。</div>"
         "<div class='tier-value'>"
         "<span class='tier-name' id='tier_{}_name'>{}</span>"
         "<span class='tier-meta' id='tier_{}_meta'>{}</span></div>"
-        "<input class='tier-slider {}{}' type='range' min='0' max='5' "
+        "<input class='tier-slider {}' type='range' min='0' max='5' "
         "step='1' value='{}' id='tier_{}'>"
-        "<div class='hint' id='tier_{}_note'>{}</div>"
+        "<div class='hint' id='tier_{}_note'></div>"
         "<details class='tier-details'><summary>风险提示（点开看）</summary>"
         "<div class='hint'>六个档位只改并发和间隔：保守 / 标准 / 激进 / 极速"
-        "逐步变快；危险 / 危险+ 的点赞速率约 68 / 100 次每秒，这个量级下"
-        "能不能签全不由客户端决定。被限流时可能导致当天部分吧签不上。</div>"
-        "</details></div>"
+        "逐步变快；危险 / 危险+ 的点赞请求约 68 / 100 次每秒，这个量级下"
+        "能不能签全不由客户端决定。<br>撞到限流会自动降到保守档继续；"
+        "遇到验证码/登录问题，或保守档仍被限流时，本次会停止剩余补签"
+        "并明确报错。</div>"
+        "</details>"
+        "<div class='overlay' id='tier_confirm_{}' style='display:none'>"
+        "<div class='box'>"
+        "<div style='font-weight:800;font-size:18px'>使用危险档位？</div>"
+        "<div class='hint' id='tier_confirm_text_{}' style='margin-top:8px'>"
+        "</div>"
+        "<div class='btn-row'>"
+        "<button class='btn btn-ghost' type='button' "
+        "id='tier_cancel_{}'>取消</button>"
+        "<button class='btn btn-primary' type='button' "
+        "id='tier_ok_{}'>确定使用</button></div></div></div>"
+        "</div>"
     ).format(
         "签到" if kind == "sign" else "随机点赞",
         kind, html.escape(labels[level]),
         kind, html.escape(metas[level]),
-        tier.color, locked, level, kind,
-        kind, html.escape(note))
+        tier.color, level, kind,
+        kind,
+        kind, kind, kind, kind)
 
 
 def _tier_script(kind, st):
     level = int(st.get("level") or 0)
-    max_open = int(st.get("max_open_level") or 3)
     names = json.dumps(_tier_labels(), ensure_ascii=False)
     metas = json.dumps([_tier_meta(kind, t) for t in tiers.TIERS],
                        ensure_ascii=False)
     colors = json.dumps([t.color for t in tiers.TIERS], ensure_ascii=False)
+    rates = json.dumps(["", "", "", "", "68 次/秒", "100 次/秒"],
+                       ensure_ascii=False)
     api = "/api/sign/settings" if kind == "sign" else "/api/like/settings"
     return """
 <script>
 (function(){
-var NAMES=%(names)s, METAS=%(metas)s, COLORS=%(colors)s;
-var MAXOPEN=%(max_open)d, START=%(level)d;
-var LOCKNOTE=MAXOPEN<5?'危险档（4–5）在 0.6.0 未解锁，0.6.1 开放':'';
+var NAMES=%(names)s, METAS=%(metas)s, COLORS=%(colors)s, RATES=%(rates)s;
+var START=%(level)d;
 var el=document.getElementById('tier_%(kind)s');
 if(!el){return;}
 var nameEl=document.getElementById('tier_%(kind)s_name');
 var metaEl=document.getElementById('tier_%(kind)s_meta');
 var noteEl=document.getElementById('tier_%(kind)s_note');
+var confirmBox=document.getElementById('tier_confirm_%(kind)s');
+var confirmText=document.getElementById('tier_confirm_text_%(kind)s');
+var okBtn=document.getElementById('tier_ok_%(kind)s');
+var cancelBtn=document.getElementById('tier_cancel_%(kind)s');
+var pending=START;
 function tierToast(msg){
   var t=document.getElementById('toast');
   if(!t){
@@ -892,40 +911,49 @@ function tierToast(msg){
   setTimeout(function(){t.style.display='none';},3000);
 }
 function paint(v){
-  el.className='tier-slider '+COLORS[v]+(MAXOPEN<5?' locked':'');
+  el.className='tier-slider '+COLORS[v];
   nameEl.textContent=NAMES[v];
   metaEl.textContent=METAS[v];
-  if(v>MAXOPEN){
-    noteEl.textContent='危险档未解锁，松手会回到上一档';
-  }else{
-    noteEl.textContent=LOCKNOTE;
-  }
+  noteEl.textContent=(v>=4)?
+    ('危险档：连续请求约 '+RATES[v]+'，可能触发百度风控'):'';
 }
-el.addEventListener('input',function(){paint(parseInt(el.value,10));});
-el.addEventListener('change',function(){
-  var v=parseInt(el.value,10);
-  if(v>MAXOPEN){
-    el.value=String(MAXOPEN);paint(MAXOPEN);
-    tierToast('危险档尚未解锁（0.6.1 开放）');
-    return;
-  }
+function save(v){
   fetch('%(api)s',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({level:v})})
   .then(function(r){return r.json();})
   .then(function(j){
-    if(j.ok){tierToast('已保存：'+NAMES[v]);}
+    if(j.ok){START=v;tierToast('已保存：'+NAMES[v]);}
     else{tierToast(j.detail||'保存失败');el.value=String(START);paint(START);}
   })
   .catch(function(e){
     tierToast('请求失败：'+e);el.value=String(START);paint(START);
   });
+}
+el.addEventListener('input',function(){paint(parseInt(el.value,10));});
+el.addEventListener('change',function(){
+  var v=parseInt(el.value,10);
+  if(v>=4){
+    pending=v;
+    confirmText.textContent='「'+NAMES[v]+'」是危险档：连续请求约 '+
+      RATES[v]+'，可能触发百度风控导致部分吧签到失败。确定使用？';
+    confirmBox.style.display='flex';
+    return;
+  }
+  save(v);
+});
+okBtn.addEventListener('click',function(){
+  confirmBox.style.display='none';save(pending);
+});
+cancelBtn.addEventListener('click',function(){
+  confirmBox.style.display='none';
+  el.value=String(START);paint(START);
 });
 paint(parseInt(el.value,10));
 })();
 </script>
-""" % {"names": names, "metas": metas, "colors": colors,
-       "max_open": max_open, "level": level, "kind": kind, "api": api}
+""" % {"names": names, "metas": metas, "colors": colors, "rates": rates,
+       "level": level, "kind": kind, "api": api}
 
 
 def _page_settings_sign():
@@ -2535,6 +2563,15 @@ function renderSingle(s){
       '网页一键签到：'+msignText+'</div>';
   }
   html+=growthLine(s.growth);
+  if(s.breaker){
+    html+='<div class="hint" style="color:#E8930C;font-weight:700;margin-top:6px">'+
+      '检测到限流，已自动降到「保守」档；触发时还剩 '+
+      (s.breaker.remaining_at_trigger||0)+' 个吧</div>';
+  }
+  if(s.forum_skipped>0){
+    html+='<div class="hint" style="color:#E5484D;margin-top:4px">已跳过 '+
+      s.forum_skipped+' 个吧（风控即停，未执行补签）</div>';
+  }
   if(s.status==='done'){
     html+='<div style="display:flex;gap:10px;margin-top:14px">';
     if(s.forum_done>0){
@@ -2617,6 +2654,15 @@ function renderMulti(s){
           '网页一键签到：'+msignText+'</div>';
       }
       html+=growthLine(a.growth);
+      if(a.breaker){
+        html+='<div class="hint" style="color:#E8930C;font-weight:700;margin-top:6px">'+
+          '检测到限流，已自动降到「保守」档；触发时还剩 '+
+          (a.breaker.remaining_at_trigger||0)+' 个吧</div>';
+      }
+      if((a.forum_skipped||0)>0){
+        html+='<div class="hint" style="color:#E5484D;margin-top:4px">已跳过 '+
+          (a.forum_skipped||0)+' 个吧（风控即停）</div>';
+      }
       if(a.status==='done'){
         html+='<div class="hint" style="margin-top:6px">补签成功 '+
           (a.forum_success||0)+' · 补签失败 '+(a.forum_failed||0)+
