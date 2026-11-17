@@ -48,6 +48,9 @@ _import_marker("py:storage")
 import tieba_api  # noqa: E402
 _import_marker("py:tieba_api")
 
+import tiers  # noqa: E402
+_import_marker("py:tiers")
+
 import signer  # noqa: E402
 _import_marker("py:signer")
 
@@ -161,6 +164,27 @@ main { padding: 20px; max-width: 560px; margin: 0 auto; }
   color: #fff; padding: 34px 20px 46px; }
 .login-head .big { font-size: 24px; font-weight: 800; }
 .login-head .sub { font-size: 13px; opacity: .9; margin-top: 6px; }
+.tier-value { display: flex; align-items: baseline; gap: 10px; margin-top: 8px; }
+.tier-name { font-size: 20px; font-weight: 800; }
+.tier-meta { font-size: 12px; color: %(muted)s; }
+.tier-slider { -webkit-appearance: none; appearance: none; width: 100%%;
+  height: 30px; background: transparent; margin-top: 6px; }
+.tier-slider::-webkit-slider-runnable-track { height: 10px; border-radius: 999px;
+  background: linear-gradient(90deg, #2B5CE6 0 33.33%%, #E8930C 33.33%% 66.66%%,
+  #E5484D 66.66%% 100%%); }
+.tier-slider.locked::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, #2B5CE6 0 33.33%%, #E8930C 33.33%% 66.66%%,
+  #5B6270 66.66%% 100%%); }
+.tier-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 26px;
+  height: 26px; margin-top: -8px; border-radius: 50%%; background: #fff;
+  border: 3px solid #2B5CE6; }
+.tier-slider.blue::-webkit-slider-thumb { border-color: #2B5CE6; }
+.tier-slider.amber::-webkit-slider-thumb { border-color: #E8930C; }
+.tier-slider.red::-webkit-slider-thumb { border-color: #E5484D; }
+.tier-details { margin-top: 10px; }
+.tier-details summary { color: %(primary)s; font-size: 13px; font-weight: 700;
+  cursor: pointer; }
+.tier-details .hint { margin-top: 8px; }
 @media (prefers-color-scheme: dark) {
   body { background: %(bg_dark)s; color: %(text_dark)s; }
   .card, .nav { background: %(card_dark)s; }
@@ -601,6 +625,8 @@ def _page_settings():
         "<span>运行诊断自检</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/auto'>"
         "<span>自动签到设置</span><span class='arrow'>›</span></a>"
+        "<a class='menu-item' href='/settings/sign'>"
+        "<span>签到速度档位</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/waterpost'>"
         "<span>自动水贴设置</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/groupsign'>"
@@ -785,15 +811,152 @@ def _size_text(num):
     return "{} KB".format(max(1, num // 1024))
 
 
+def _tier_meta(kind, tier):
+    if kind == "sign":
+        return "签到并发 {}".format(tier.sign_concurrency)
+    lo, hi = tier.like_delay
+    return "点赞并发 {} · 每次间隔 {:.2f}–{:.2f} 秒".format(
+        tier.like_concurrency, lo, hi)
+
+
+def _tier_labels():
+    return [(t.icon + " " if t.icon else "") + t.name for t in tiers.TIERS]
+
+
+def _tier_section(kind, st):
+    """速度档位滑块（M3a / D6–D8）。kind: sign | like。"""
+    level = int(st.get("level") or 0)
+    max_open = int(st.get("max_open_level") or 3)
+    tier = tiers.get(level)
+    metas = [_tier_meta(kind, t) for t in tiers.TIERS]
+    labels = _tier_labels()
+    locked = " locked" if not st.get("red_unlocked") else ""
+    note = ""
+    if not st.get("red_unlocked"):
+        note = ("危险档（4–5）在 0.6.0 只做展示、不能保存：需要先有硬停和"
+                "熔断降档，计划 0.6.1 解锁。")
+    return (
+        "<div class='card'><div class='title'>{}速度档位</div>"
+        "<div class='hint'>档位调的是<b>速度</b>，不是成功率；越高越容易被"
+        "百度限流，可能导致当天部分吧签不上。</div>"
+        "<div class='tier-value'>"
+        "<span class='tier-name' id='tier_{}_name'>{}</span>"
+        "<span class='tier-meta' id='tier_{}_meta'>{}</span></div>"
+        "<input class='tier-slider {}{}' type='range' min='0' max='5' "
+        "step='1' value='{}' id='tier_{}'>"
+        "<div class='hint' id='tier_{}_note'>{}</div>"
+        "<details class='tier-details'><summary>风险提示（点开看）</summary>"
+        "<div class='hint'>六个档位只改并发和间隔：保守 / 标准 / 激进 / 极速"
+        "逐步变快；危险 / 危险+ 的点赞速率约 68 / 100 次每秒，这个量级下"
+        "能不能签全不由客户端决定。被限流时可能导致当天部分吧签不上。</div>"
+        "</details></div>"
+    ).format(
+        "签到" if kind == "sign" else "随机点赞",
+        kind, html.escape(labels[level]),
+        kind, html.escape(metas[level]),
+        tier.color, locked, level, kind,
+        kind, html.escape(note))
+
+
+def _tier_script(kind, st):
+    level = int(st.get("level") or 0)
+    max_open = int(st.get("max_open_level") or 3)
+    names = json.dumps(_tier_labels(), ensure_ascii=False)
+    metas = json.dumps([_tier_meta(kind, t) for t in tiers.TIERS],
+                       ensure_ascii=False)
+    colors = json.dumps([t.color for t in tiers.TIERS], ensure_ascii=False)
+    api = "/api/sign/settings" if kind == "sign" else "/api/like/settings"
+    return """
+<script>
+(function(){
+var NAMES=%(names)s, METAS=%(metas)s, COLORS=%(colors)s;
+var MAXOPEN=%(max_open)d, START=%(level)d;
+var LOCKNOTE=MAXOPEN<5?'危险档（4–5）在 0.6.0 未解锁，0.6.1 开放':'';
+var el=document.getElementById('tier_%(kind)s');
+if(!el){return;}
+var nameEl=document.getElementById('tier_%(kind)s_name');
+var metaEl=document.getElementById('tier_%(kind)s_meta');
+var noteEl=document.getElementById('tier_%(kind)s_note');
+function tierToast(msg){
+  var t=document.getElementById('toast');
+  if(!t){
+    t=document.createElement('div');t.id='toast';
+    t.style.position='fixed';t.style.left='50%%';t.style.bottom='86px';
+    t.style.transform='translateX(-50%%)';t.style.background='#141821';
+    t.style.color='#fff';t.style.borderRadius='999px';
+    t.style.padding='12px 22px';t.style.fontSize='14px';
+    t.style.maxWidth='84%%';t.style.zIndex='60';
+    document.body.appendChild(t);
+  }
+  t.textContent=msg;t.style.display='block';
+  setTimeout(function(){t.style.display='none';},3000);
+}
+function paint(v){
+  el.className='tier-slider '+COLORS[v]+(MAXOPEN<5?' locked':'');
+  nameEl.textContent=NAMES[v];
+  metaEl.textContent=METAS[v];
+  if(v>MAXOPEN){
+    noteEl.textContent='危险档未解锁，松手会回到上一档';
+  }else{
+    noteEl.textContent=LOCKNOTE;
+  }
+}
+el.addEventListener('input',function(){paint(parseInt(el.value,10));});
+el.addEventListener('change',function(){
+  var v=parseInt(el.value,10);
+  if(v>MAXOPEN){
+    el.value=String(MAXOPEN);paint(MAXOPEN);
+    tierToast('危险档尚未解锁（0.6.1 开放）');
+    return;
+  }
+  fetch('%(api)s',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({level:v})})
+  .then(function(r){return r.json();})
+  .then(function(j){
+    if(j.ok){tierToast('已保存：'+NAMES[v]);}
+    else{tierToast(j.detail||'保存失败');el.value=String(START);paint(START);}
+  })
+  .catch(function(e){
+    tierToast('请求失败：'+e);el.value=String(START);paint(START);
+  });
+});
+paint(parseInt(el.value,10));
+})();
+</script>
+""" % {"names": names, "metas": metas, "colors": colors,
+       "max_open": max_open, "level": level, "kind": kind, "api": api}
+
+
+def _page_settings_sign():
+    """签到速度档位设置（M3a / D1、D5）。"""
+    st = signer.get_settings()
+    body = (
+        "<div class='topbar'>签到速度</div><main>"
+        "<div class='card'><div class='title'>说明</div>"
+        "<div class='hint'>这一档决定「一键签到」逐吧补签的并发数；"
+        "它只管速度，不保证成功率。调高后如果百度返回「操作太快」，"
+        "部分吧会签到失败，第二天才会有机会补上。</div></div>"
+        + _tier_section("sign", st) +
+        "<div class='hint' style='margin-top:12px'>随机点赞的档位在"
+        "<a href='/settings/like'>随机点赞设置</a>里单独调，两边互不影响。</div>"
+        "</main>"
+    )
+    return _page("签到速度", body + _tier_script("sign", st), "settings")
+
+
 def _page_settings_like():
-    """随机点赞设置：每日自动开关 + 自动时间。"""
+    """随机点赞设置：速度档位 + 每日自动开关 + 自动时间。"""
     ast = autosign.get_settings()
-    html_part = (
+    lk = liker.get_settings()
+    intro = (
         "<div class='topbar'>随机点赞设置</div><main>"
         "<div class='card'><div class='title'>说明</div>"
         "<div class='hint'>随机点赞 = 每个关注的吧随机抽 1 个非置顶帖点主楼赞，"
         "每个吧每天最多一次；只点主楼赞，失败不影响签到。<br>"
         "签到页的「开始随机点赞」随时可以手动执行。</div></div>"
+    )
+    auto_card = (
         "<div class='card'><div class='title'>每日自动点赞</div>"
         "<label class='menu-item'><span>每天自动执行</span>"
         "<input type='checkbox' id='lk_auto'{}></label>"
@@ -808,7 +971,7 @@ def _page_settings_like():
         "<div class='hint'>关闭只影响每日自动，签到页的手动按钮仍然可用；"
         "与自动签到共用前台服务。</div>"
         "<button class='btn btn-primary' type='button' "
-        "onclick='lkSave()'>保存设置</button>"
+        "onclick='lkSave()'>保存自动设置</button>"
         "<div class='errorbox' id='lk_err'></div></div>"
         "</main>"
         "<div id='toast' style='display:none;position:fixed;left:50%;"
@@ -844,7 +1007,9 @@ if(j.ok){lkToast('设置已保存');}else{lkErr(j.detail||'保存失败');}})
 .catch(function(e){lkErr('请求失败：'+e);});}
 </script>
 """
-    return _page("随机点赞设置", html_part + script, "settings")
+    html_part = intro + _tier_section("like", lk) + auto_card
+    return _page("随机点赞设置",
+                 html_part + _tier_script("like", lk) + script, "settings")
 
 
 def _page_settings_auto():
@@ -1572,6 +1737,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 _send_html(self, _page_settings_groupsign())
             elif path == "/settings/like":
                 _send_html(self, _page_settings_like())
+            elif path == "/settings/sign":
+                _send_html(self, _page_settings_sign())
             elif path == "/settings/update":
                 # 进入这一页就算看过了：红点清掉（与签到页同样的约定）。
                 # 没查到东西时这里本来也没红点，所以清不清都一样。
@@ -1658,6 +1825,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._api_groupsign_start(data)
             elif path == "/api/auto/settings":
                 self._api_auto_settings(data)
+            elif path == "/api/sign/settings":
+                self._api_sign_settings(data)
+            elif path == "/api/like/settings":
+                self._api_like_settings(data)
             elif path == "/api/auto/run-now":
                 self._api_auto_run_now()
             elif path == "/api/waterpost/settings":
@@ -2027,6 +2198,28 @@ class AppHandler(BaseHTTPRequestHandler):
         _send_json(self, {"ok": True, "texts": waterpost.default_texts()})
 
     # ---- 吧群签到 -----------------------------------------------------
+
+    def _api_sign_settings(self, data):
+        try:
+            settings = signer.save_settings(data)
+        except ValueError as exc:
+            _send_json(self, {"ok": False, "detail": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            _send_json(self, {"ok": False, "detail": "保存失败：{}".format(exc)})
+            return
+        _send_json(self, {"ok": True, "settings": settings})
+
+    def _api_like_settings(self, data):
+        try:
+            settings = liker.save_settings(data)
+        except ValueError as exc:
+            _send_json(self, {"ok": False, "detail": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            _send_json(self, {"ok": False, "detail": "保存失败：{}".format(exc)})
+            return
+        _send_json(self, {"ok": True, "settings": settings})
 
     def _api_groupsign_settings(self, data):
         try:

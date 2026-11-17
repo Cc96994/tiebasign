@@ -27,10 +27,15 @@ _PRIVATE = tempfile.mkdtemp(prefix="like_selftest_")
 os.environ["ANDROID_PRIVATE"] = _PRIVATE
 
 import liker  # noqa: E402
-
-# 测试里不需要真的等 2~3.5 秒；生产值仍保留在模块里。
-liker._LIKE_DELAY = (0, 0)
+import tiers  # noqa: E402
 import tieba_api  # noqa: E402
+
+# 测试不需要真的等 0.25–0.5 秒：把档位表查表换成一个「零延迟、5 并发」的测试档。
+# 真实档位表、clamp 和设置页在 test_signer / test_ui_update 里验证。
+_REAL_TIER_GET = tiers.get
+_TEST_TIER = tiers.Tier(level=1, name="标准", icon="", sign_concurrency=4,
+                        like_concurrency=5, like_delay=(0, 0), color="blue")
+tiers.get = lambda level: _TEST_TIER
 
 TOTAL = [0]
 FAILS = []
@@ -185,16 +190,10 @@ def run_like(forums, agree_errs=None, agree_sequence=None,
     fake_module = types.ModuleType("aiotieba")
     fake_module.Client = FakeClient
     sys.modules["aiotieba"] = fake_module
-    # 测试里不需要真的按 10 次/秒排队；速率上限的行为在 L5 的专用断言里测。
-    old_rate, old_burst = liker._LIKE_RATE, liker._LIKE_BURST
-    liker._LIKE_RATE, liker._LIKE_BURST = 1000.0, 5.0
-    try:
-        rid, err = liker.start([(ACCOUNT, "fake-bduss")])
-        if err:
-            raise AssertionError(err)
-        return wait_done()
-    finally:
-        liker._LIKE_RATE, liker._LIKE_BURST = old_rate, old_burst
+    rid, err = liker.start([(ACCOUNT, "fake-bduss")])
+    if err:
+        raise AssertionError(err)
+    return wait_done()
 
 
 def test_one_like_per_forum():
@@ -291,7 +290,8 @@ def test_batched_writes():
     finally:
         liker._save, liker._load = real_save, real_load
     sub = state["accounts"][0]
-    check("L1：一轮只读一次记录文件", len(loads) == 1, len(loads))
+    check("L1：读盘按批（25 个吧 <= 4 次，不按吧读）",
+          len(loads) <= 4, len(loads))
     check("L1：25 个吧最多写 3 次盘（旧实现每吧一次）",
           1 <= len(saves) <= 3, len(saves))
     check("L1：25 个吧全部成功", sub["success"] == 25, sub)
@@ -382,6 +382,34 @@ def test_rate_limit_cooldown():
           asyncio.run(cooldown_slot()) is True)
 
 
+def test_tier_settings():
+    """M3a：点赞档位设置、clamp 与红档未解锁。"""
+    reset()
+    tiers.get = _REAL_TIER_GET
+    try:
+        st = liker.get_settings()
+        check("点赞档位默认=标准", st["level"] == 1, st)
+        st = liker.save_settings({"level": 2})
+        check("点赞档位可保存到激进", st["level"] == 2, st)
+        check("点赞设置页能读回激进", liker.get_settings()["level"] == 2)
+        try:
+            liker.save_settings({"level": 5})
+            rejected = False
+        except ValueError:
+            rejected = True
+        check("红档未解锁时拒绝保存", rejected)
+        data = liker._load()
+        data["level"] = 99
+        liker._save(data)
+        st = liker.get_settings()
+        check("手改 level=99 压回 5（stored）",
+              st["stored_level"] == 5, st)
+        check("红档未解锁时实际按极速（3）运行", st["level"] == 3, st)
+        liker.save_settings({"level": 1})
+    finally:
+        tiers.get = _TEST_TIER
+
+
 def main():
     print("== 每吧一个赞 =="); test_one_like_per_forum()
     print("== 每日限制 =="); test_daily_guard_and_next_day()
@@ -389,6 +417,7 @@ def main():
     print("== 批量写盘 =="); test_batched_writes()
     print("== 取帖/点赞并发 =="); test_fetch_and_like_concurrency()
     print("== 限流退避 =="); test_rate_limit_cooldown()
+    print("== 档位设置 =="); test_tier_settings()
     print()
     print("{} checks, {} failed".format(TOTAL[0], len(FAILS)))
     if FAILS:

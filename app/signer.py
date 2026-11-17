@@ -13,8 +13,8 @@ Failure categories: 已签到 / 未关注 / 吧不存在 / 登录问题 / 需要
 Manual runs never raise system notifications and never set the red dot.
 
 v0.5.0 changes:
-    * 逐吧补签改成**有上限的并发**（SIGN_CONCURRENCY），单次请求之间加几十
-      毫秒抖动。串行时几百个吧要几分钟，这是签到慢的主因；并发仍然是单次
+    * 逐吧补签改成**有上限的并发**（并发值后来由 M3 档位接管），单次请求之间加
+      几十毫秒抖动。串行时几百个吧要几分钟，这是签到慢的主因；并发仍然是单次
       尝试、不重试，不改变 PRD 里「失败就记失败」的语义。
     * 错误码结构化：msign / 每个吧失败都带 ``code``、``reason``（见
       ``tieba_codes``）和完整 ``detail``，并写入 ``sign.log``。日志只落
@@ -59,6 +59,7 @@ import errors
 import redact
 import tieba_api
 import tieba_codes
+import tiers
 
 _lock = threading.RLock()
 _run_counter = 0
@@ -66,9 +67,7 @@ _state = None
 
 MAX_FORUM_PAGES = 25  # 25 * 200 = 5000 forums, far beyond realistic usage
 
-#: 同时最多几个 sign_forum 请求。取 4 是折中：串行几百个吧要几分钟；再高
-#: 会让短时间内的请求峰值更像脚本。每条请求前随机停 30~150ms 打散节奏。
-SIGN_CONCURRENCY = 4
+#: 同时最多几个 sign_forum 请求由速度档位决定（见 tiers.py），这里不再写死。
 SIGN_JITTER = (0.03, 0.15)
 
 #: 关注列表除第一页外，一次并行预取几页（S4）。按每页 200 个吧算：
@@ -86,6 +85,7 @@ PHASE_SIGN_SLEEP = "sign_sleep"
 
 _LOG_FILENAME = "sign.log"
 _REPORT_FILENAME = "tiebasign_sign_last.json"
+_SETTINGS_FILENAME = "tiebasign_sign.json"
 _LOG_MAX_BYTES = 512 * 1024
 _REPORT_FAILURES_MAX = 200
 _REPORT_WARNINGS_MAX = 50
@@ -113,6 +113,67 @@ def _phase_add(state, phase, started_ms):
 def _data_path(filename):
     base = os.environ.get("ANDROID_PRIVATE") or os.getcwd()
     return os.path.join(base, filename)
+
+
+# --------------------------------------------------------------------------
+# 速度档位设置（0.6.0 M3a）
+# --------------------------------------------------------------------------
+
+def _load_settings():
+    """读档位；损坏/越界都压回合法值，绝不信配置文件里的裸数字。"""
+    level = tiers.DEFAULT_LEVEL
+    try:
+        with open(_data_path(_SETTINGS_FILENAME), "r",
+                  encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            level = tiers.clamp(data.get("level", tiers.DEFAULT_LEVEL))
+    except (OSError, ValueError):
+        pass
+    return {"level": level}
+
+
+def _save_settings(level):
+    path = _data_path(_SETTINGS_FILENAME)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"level": int(level)}, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _effective_level(stored_level):
+    """运行时真正生效的档位：红档未解锁时，手改配置也不能越过上限。"""
+    return min(tiers.clamp(stored_level), tiers.max_open_level())
+
+
+def get_settings():
+    """公开的速度档位设置（含档名/并发，界面和报告都从这里读）。"""
+    stored = _load_settings()["level"]
+    level = _effective_level(stored)
+    tier = tiers.get(level)
+    return {
+        "level": tier.level,
+        "stored_level": stored,
+        "name": tier.name,
+        "icon": tier.icon,
+        "color": tier.color,
+        "sign_concurrency": tier.sign_concurrency,
+        "max_level": tiers.TIER_COUNT - 1,
+        "max_open_level": tiers.max_open_level(),
+        "red_unlocked": tiers.RED_UNLOCKED,
+    }
+
+
+def save_settings(payload):
+    """保存档位。红档未解锁时服务端也拒绝，不只靠界面灰掉。"""
+    if not isinstance(payload, dict):
+        raise ValueError("设置格式不对")
+    level = tiers.clamp(payload.get("level", tiers.DEFAULT_LEVEL))
+    if not tiers.can_open(level):
+        raise ValueError("危险档位尚未解锁（0.6.0 只开放到「极速」）")
+    _save_settings(level)
+    _log("settings saved level={}".format(level))
+    return get_settings()
 
 
 def _log(msg, secret=None):
@@ -152,6 +213,8 @@ def _new_state(run_id, account):
         "forum_done": 0,        # 补签时服务端返回「今天已签到」，不算失败
         "forum_failed": 0,
         "phase_ms": {},         # P0-2 分段耗时：登录 / msign / 列表 / 补签 ...
+        "tier_level": None,     # M3a 本轮使用的速度档位（来自 tiers.py）
+        "tier_name": None,
         "failures": [],         # [{forum,category,code,reason,detail}]
         "warnings": [],         # non-fatal: msign / 后续步骤的旁路问题
         "error": None,          # run-level fatal error
@@ -321,10 +384,16 @@ def _append_failure_in(state, item):
     state["forum_failed"] += 1
 
 
-async def _sign_forums(client, state, forums, secret=None):
-    """有上限并发地逐吧补签；每个吧仍然只尝试一次。"""
+async def _sign_forums(client, state, forums, secret=None, concurrency=None):
+    """有上限并发地逐吧补签；每个吧仍然只尝试一次。
+
+    ``concurrency`` 只能来自入口读到的速度档位（M3a）；没传时退回默认档，
+    读配置文件只发生在 ``_sign_async`` 入口，协程里绝不读盘。
+    """
     total = len(forums)
-    concurrency = max(1, int(SIGN_CONCURRENCY))
+    if concurrency is None:
+        concurrency = tiers.get(tiers.DEFAULT_LEVEL).sign_concurrency
+    concurrency = max(1, int(concurrency))
     sem = asyncio.Semaphore(concurrency)
     jitter_lo, jitter_hi = SIGN_JITTER
 
@@ -448,11 +517,15 @@ async def _sign_async(state, bduss):
     import aiotieba
 
     secret = bduss if isinstance(bduss, str) else None
+    # M3a / D4：配置只在入口读一次；后面所有协程用这个局部值，不读盘。
+    # 红档未解锁时 _effective_level 会把越界的配置压回「极速」。
+    tier = tiers.get(_effective_level(_load_settings()["level"]))
     try:
-        _update_in(state, status="running", step="连接百度并验证账号")
-        _log("run={} account_id={} mask={} start".format(
+        _update_in(state, status="running", step="连接百度并验证账号",
+                   tier_level=tier.level, tier_name=tier.name)
+        _log("run={} account_id={} mask={} tier={} start".format(
             state.get("run_id"), state.get("account_id"),
-            state.get("account_mask")), secret)
+            state.get("account_mask"), tier.name), secret)
         async with aiotieba.Client(bduss) as client:
             # ---- 1. account validity gate --------------------------------
             login_started = _now_ms()
@@ -547,12 +620,13 @@ async def _sign_async(state, bduss):
             _update_in(state, forum_total=len(to_sign), step="逐吧补签")
             _log("run={} followed={} to_sign={} concurrency={}".format(
                 state.get("run_id"), len(forums), len(to_sign),
-                max(1, int(SIGN_CONCURRENCY))), secret)
+                tier.sign_concurrency), secret)
 
             # ---- 4. sign each still-unsigned forum (single attempt) ------
             sign_started = _now_ms()
             try:
-                await _sign_forums(client, state, to_sign, secret)
+                await _sign_forums(client, state, to_sign, secret,
+                                   concurrency=tier.sign_concurrency)
             finally:
                 _phase_add(state, PHASE_SIGN, sign_started)
 
@@ -605,6 +679,8 @@ def _snapshot_for_report(state):
         "elapsed_ms": ((state.get("finished_at") or _now_ms())
                        - (state.get("started_at") or _now_ms())),
         "phase_ms": dict(state.get("phase_ms") or {}),
+        "tier_level": state.get("tier_level"),
+        "tier_name": state.get("tier_name"),
     }
     if snap["mode"] == "multi":
         accounts = []
@@ -624,6 +700,8 @@ def _snapshot_for_report(state):
                 "forum_done": sub.get("forum_done"),
                 "forum_failed": sub.get("forum_failed"),
                 "phase_ms": dict(sub.get("phase_ms") or {}),
+                "tier_level": sub.get("tier_level"),
+                "tier_name": sub.get("tier_name"),
                 "failures": list(sub.get("failures") or [])[:_REPORT_FAILURES_MAX],
                 "warnings": list(sub.get("warnings") or [])[:_REPORT_WARNINGS_MAX],
                 "error": sub.get("error"),
@@ -757,6 +835,14 @@ def _report_lines_for_account(label, acct):
     mask = acct.get("account_mask") or ""
     lines.append("{}：{}（BDUSS {}）".format(label, name, mask))
     lines.append("  状态：{}".format(acct.get("status") or "?"))
+    if acct.get("tier_name"):
+        level = acct.get("tier_level")
+        try:
+            concurrency = tiers.get(level).sign_concurrency
+        except (TypeError, ValueError):
+            concurrency = "?"
+        lines.append("  速度档位：{}（签到并发 {}）".format(
+            acct.get("tier_name"), concurrency))
     growth = _fmt_growth(acct.get("growth"))
     if growth:
         lines.append("  " + growth)

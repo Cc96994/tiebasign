@@ -193,6 +193,21 @@ def page_content_checks():
           "id='gs_btn'" in sign_html2 and "开始吧群签到" in sign_html2)
     check("设置页有「吧群签到设置」入口",
           "/settings/groupsign" in main._page_settings())
+    check("设置页有「签到速度档位」入口",
+          "/settings/sign" in main._page_settings())
+    sign_tier_page = main._page_settings_sign()
+    check("签到速度页有滑块与折叠风险提示",
+          "id='tier_sign'" in sign_tier_page
+          and "type='range'" in sign_tier_page
+          and "<details" in sign_tier_page
+          and "风险提示" in sign_tier_page, sign_tier_page[:200])
+    like_tier_page = main._page_settings_like()
+    check("随机点赞设置页有速度滑块",
+          "id='tier_like'" in like_tier_page
+          and "type='range'" in like_tier_page)
+    check("档位滑块有蓝/黄/红三组颜色 class",
+          all(k in main._CSS for k in
+              (".tier-slider.blue", ".tier-slider.amber", ".tier-slider.red")))
     gs_html = main._page_settings_groupsign()
     check("吧群签到页能渲染",
           "吧群签到设置" in gs_html and "添加群" in gs_html, gs_html[:200])
@@ -317,6 +332,30 @@ def http_checks():
               status == 200 and "随机点赞设置" in like_page
               and all(k in like_page for k in
                       ("lk_auto", "lk_auto_mode", "lk_auto_time")))
+        check("随机点赞设置页有速度档位滑块",
+              status == 200 and "id='tier_like'" in like_page
+              and "type='range'" in like_page
+              and "风险提示" in like_page)
+        status, sign_page = get("/settings/sign")
+        check("GET /settings/sign 200 且有速度档位滑块",
+              status == 200 and "id='tier_sign'" in sign_page
+              and "type='range'" in sign_page and "<details" in sign_page)
+        status, body = post("/api/sign/settings", {"level": 2})
+        check("签到档位可保存到激进",
+              status == 200 and body["ok"] is True
+              and body["settings"]["level"] == 2, body)
+        status, body = post("/api/sign/settings", {"level": 5})
+        check("签到红档未解锁时被拒",
+              status == 200 and body["ok"] is False, body)
+        status, body = post("/api/like/settings", {"level": 0})
+        check("点赞档位可保存到保守",
+              status == 200 and body["ok"] is True
+              and body["settings"]["level"] == 0, body)
+        status, body = post("/api/like/settings", {"level": 4})
+        check("点赞红档未解锁时被拒",
+              status == 200 and body["ok"] is False, body)
+        post("/api/sign/settings", {"level": 1})
+        post("/api/like/settings", {"level": 1})
         status, body = get("/api/update/state")
         state = json.loads(body)["state"]
         check("GET /api/update/state 200",

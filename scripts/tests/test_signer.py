@@ -286,7 +286,6 @@ async def run_sign(forums, behavior=None, msign_err=None, growth_err=None,
     sys.modules["aiotieba"] = mod
 
     state = make_state()
-    signer.SIGN_CONCURRENCY = 4
     signer.SIGN_JITTER = (0, 0)
     await signer._sign_async(state, FAKE_BDUSS)
     signer._persist_report(state)
@@ -671,6 +670,57 @@ def test_autosign_warning_not_failure():
     check("自动签到：通知带中文原因", "该吧不存在" in text, text)
 
 
+def test_tier_settings():
+    """M3a：签到档位设置、clamp、红档未解锁与并发接线。"""
+    import tiers
+
+    reset_files()
+    check("档位表有 6 档", len(tiers.TIERS) == 6)
+    check("颜色按 蓝/蓝/黄/黄/红/红",
+          [t.color for t in tiers.TIERS] ==
+          ["blue", "blue", "amber", "amber", "red", "red"],
+          [t.color for t in tiers.TIERS])
+    check("clamp 99 -> 5", tiers.clamp(99) == 5)
+    check("clamp -1 -> 0", tiers.clamp(-1) == 0)
+    check("clamp 非数字 -> 默认档", tiers.clamp("x") == tiers.DEFAULT_LEVEL)
+    check("危险+ 图标带 FE0F", "\ufe0f" in tiers.get(5).icon)
+    check("标准档点赞延迟 0.25–0.50",
+          tiers.get(1).like_delay == (0.25, 0.50))
+    check("标准档点赞速率约 10.5 次/秒",
+          abs(tiers.like_rate_per_sec(tiers.get(1)) - 10.5) < 0.2,
+          tiers.like_rate_per_sec(tiers.get(1)))
+    check("危险+ 点赞速率约 100 次/秒",
+          abs(tiers.like_rate_per_sec(tiers.get(5)) - 103) < 2,
+          tiers.like_rate_per_sec(tiers.get(5)))
+
+    check("签到档位默认=标准", signer.get_settings()["level"] == 1)
+    st = signer.save_settings({"level": 0})
+    check("签到档位可保存到保守",
+          st["level"] == 0 and st["sign_concurrency"] == 2, st)
+    try:
+        signer.save_settings({"level": 5})
+        rejected = False
+    except ValueError:
+        rejected = True
+    check("红档未解锁时拒绝保存", rejected)
+    # 手改配置 99：clamp 到 5，但 0.6.0 红档未解锁，实际按极速（3）运行
+    with open(signer._data_path(signer._SETTINGS_FILENAME), "w",
+              encoding="utf-8") as fh:
+        json.dump({"level": 99}, fh)
+    st = signer.get_settings()
+    check("手改 level=99 压回危险+", st["stored_level"] == 5, st)
+    check("红档未解锁时实际按极速运行", st["level"] == 3, st)
+
+    # 档位 0（并发 2）要真的限制住并写进运行状态
+    signer.save_settings({"level": 0})
+    forums = [FakeForum("t{}".format(i)) for i in range(4)]
+    state, client = asyncio.run(run_sign(forums))
+    check("保守档签到并发 <= 2", client.max_active <= 2, client.max_active)
+    check("运行状态带档位", state.get("tier_level") == 0,
+          state.get("tier_level"))
+    signer.save_settings({"level": 1})
+
+
 def main():
     install_fake_aiotieba()
     print("== 错误码表 =="); test_codes()
@@ -683,6 +733,7 @@ def main():
     print("== 关注列表并行预取（S4） =="); test_follow_pages_prefetch()
     print("== 多账号并行（S8） =="); test_multi_accounts_parallel()
     print("== 成长等级签到 =="); test_growth_step()
+    print("== 档位设置（M3a） =="); test_tier_settings()
     print("== 自动签到 warnings =="); test_autosign_warning_not_failure()
     print("== 自动模块 =="); test_auto_modules()
     print()

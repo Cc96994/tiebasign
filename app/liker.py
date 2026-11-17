@@ -34,21 +34,18 @@ import errors
 import redact
 import tieba_api
 import tieba_codes
+import tiers
 
 _DATA_FILENAME = "tiebasign_like.json"
 _MAX_FORUM_PAGES = 25
-_LIKE_CONCURRENCY = 5
-_LIKE_DELAY = (0.25, 0.5)
-#: L3：取帖是纯读、风控权重低，单独给 12 并发；点赞仍由 _LIKE_CONCURRENCY 管。
+#: 点赞并发 / 延迟由速度档位（tiers.py）决定，这里不再写死。
+#: L3：取帖是纯读、风控权重低，单独给 12 并发；点赞仍由档位并发管。
 _FETCH_CONCURRENCY = 12
 _LIKE_RETRIES = 2
 _RL_CODE = 3280004
 _RN = 30
 #: L1/L2：进程内累积，每 20 个「ok 状态变化」才整文件落盘一次，结束再落一次。
 _FLUSH_EVERY = 20
-#: L5：点赞请求的全局速率（每秒）与突发；M3 档位会按并发/延迟换算后覆盖。
-_LIKE_RATE = 10.0
-_LIKE_BURST = 5.0
 _MIN_LIKE_RATE = 1.0
 #: L4：撞 3280004 后的全局冷却时间（秒）；测试可调小。
 _RL_BACKOFF = (5.0, 12.0)
@@ -168,6 +165,8 @@ def _note_last_run(data, sub, elapsed_ms):
         "failed": int(sub.get("failed") or 0),
         "skipped": int(sub.get("skipped") or 0),
         "phase_ms": dict(sub.get("phase_ms") or {}),
+        "tier_level": sub.get("tier_level"),
+        "tier_name": sub.get("tier_name"),
     }
 
 
@@ -212,6 +211,9 @@ def _record_forum(data, account_id, fname, ok, tid=None, title=None,
 
 def get_settings():
     data = _load()
+    stored = tiers.clamp(data.get("level", tiers.DEFAULT_LEVEL))
+    level = min(stored, tiers.max_open_level())
+    tier = tiers.get(level)
     accounts = []
     for aid, acct in sorted(data["accounts"].items(),
                             key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0):
@@ -220,7 +222,34 @@ def get_settings():
             "date": acct.get("date"),
             "forums": acct.get("forums") or {},
         })
-    return {"enabled": bool(data.get("enabled", True)), "accounts": accounts}
+    return {
+        "enabled": bool(data.get("enabled", True)),
+        "accounts": accounts,
+        "level": tier.level,
+        "stored_level": stored,
+        "name": tier.name,
+        "icon": tier.icon,
+        "color": tier.color,
+        "like_concurrency": tier.like_concurrency,
+        "like_delay": list(tier.like_delay),
+        "like_rate_per_sec": round(tiers.like_rate_per_sec(tier), 1),
+        "max_level": tiers.TIER_COUNT - 1,
+        "max_open_level": tiers.max_open_level(),
+        "red_unlocked": tiers.RED_UNLOCKED,
+    }
+
+
+def save_settings(payload):
+    """保存点赞侧的速度档位；红档未解锁时服务端拒绝。"""
+    if not isinstance(payload, dict):
+        raise ValueError("设置格式不对")
+    level = tiers.clamp(payload.get("level", tiers.DEFAULT_LEVEL))
+    if not tiers.can_open(level):
+        raise ValueError("危险档位尚未解锁（0.6.0 只开放到「极速」）")
+    data = _load()
+    data["level"] = level
+    _save(data)
+    return get_settings()
 
 
 def _new_state(run_id, pairs):
@@ -239,6 +268,8 @@ def _new_state(run_id, pairs):
             "failed": 0,
             "skipped": 0,
             "phase_ms": {},
+            "tier_level": None,
+            "tier_name": None,
             "failures": [],
             "error": None,
         })
@@ -451,12 +482,25 @@ async def _like_account_async(account, bduss):
 
     aid = account["id"]
     sub = _sub_for(aid)
+    # M3a / D4：档位只在入口读一次；协程里不再读盘。
+    cfg = _load()
+    tier = tiers.get(min(tiers.clamp(cfg.get("level", tiers.DEFAULT_LEVEL)),
+                         tiers.max_open_level()))
+    like_concurrency = max(1, tier.like_concurrency)
+    like_delay = tuple(tier.like_delay)
+    like_rate = tiers.like_rate_per_sec(tier)
+    _update_account(aid, tier_level=tier.level, tier_name=tier.name)
     run_started = _now_ms()
     store = _load()
     flush = {"changes": 0}
 
     def _flush():
         try:
+            # 运行期间用户可能在设置页改了档位：落盘前先把 level 从磁盘
+            # 合回来，别让本轮开始时读到的旧值把新设置覆盖掉。
+            fresh = _load()
+            if "level" in fresh:
+                store["level"] = fresh["level"]
             _save(store)
         except Exception:  # noqa: BLE001 - 落盘失败不能打断点赞
             pass
@@ -487,8 +531,8 @@ async def _like_account_async(account, bduss):
 
             # L3：取帖与点赞分开限流，取帖不会把点赞的槽位占死。
             fetch_sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
-            like_sem = asyncio.Semaphore(max(1, _LIKE_CONCURRENCY))
-            limiter = _RateLimiter(_LIKE_RATE, _LIKE_BURST)
+            like_sem = asyncio.Semaphore(like_concurrency)
+            limiter = _RateLimiter(like_rate, like_concurrency)
             cooldown = {"until": 0.0}
             flags = {"stop": False}
             rng = random.SystemRandom()
@@ -543,7 +587,7 @@ async def _like_account_async(account, bduss):
                 # _agree_with_retry（冷却窗在信号量外面）。
                 resp, err = await _agree_with_retry(
                     client, tid, like_sem, limiter, cooldown, sub,
-                    rng.uniform(*_LIKE_DELAY))
+                    rng.uniform(*like_delay))
                 if err is not None:
                     info = _describe(err)
                     _add_failure(sub, fname, info)
