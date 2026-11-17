@@ -171,12 +171,14 @@ check("settings: 不再是单账号模型", "account_id" not in st)
 
 # ---------------------------------------------------------------- 6 错误分类
 class E1:
-    code = 4
+    code = 340011
     msg = "操作过于频繁，请稍后再试"
 
 
 class E2:
-    code = 1
+    # 4.7.1 的 add_post 在触发验证码时抛的是没有 code 的 TiebaValueError，
+    # 所以这里不能塞一个假的 code。
+    code = None
     msg = "Need verify code"
 
 
@@ -186,16 +188,32 @@ class E3(Exception):
 
 
 class E4:
-    code = 5
+    code = None
     msg = "您发布的内容含有敏感词"
+
+
+class E5:
+    code = None
+    msg = ""
 
 
 check("classify: 频繁->被限制/风控",
       waterpost._classify(E1())["category"] == "被限制/风控")
+check("classify: 保留错误码", waterpost._classify(E1())["code"] == 340011)
 check("classify: 验证码", waterpost._classify(E2())["category"] == "需要验证码")
 check("classify: 网络异常", waterpost._classify(E3())["category"] == "网络异常")
 check("classify: 内容违规", waterpost._classify(E4())["category"] == "内容违规")
-check("classify: 保留错误码", "4" in waterpost._classify(E1())["detail"])
+check("classify: 未知错误不再叫「风控其他」",
+      waterpost._classify(E5())["category"] == "原因不明",
+      waterpost._classify(E5()))
+check("classify: 保留错误码在 detail 里",
+      "340011" in waterpost._classify(E1())["detail"])
+
+# 清单第 6 节第 5 条：日志必须落在 ANDROID_PRIVATE，不能只认 os.getcwd()。
+waterpost._log("selftest log path")
+check("waterpost.log 落在 ANDROID_PRIVATE",
+      os.path.exists(os.path.join(os.environ["ANDROID_PRIVATE"],
+                                  "waterpost.log")))
 
 # ---------------------------------------------------------------- 7 计划状态机
 fake_signer = types.ModuleType("signer")
@@ -225,6 +243,19 @@ def make_target(tid, target_id, enabled=True):
             "pid": None, "fname": "f{}".format(target_id),
             "title": "t{}".format(target_id), "enabled": enabled,
             "added_at": 0}
+
+
+# 0.6.0 P0-1：错误码必须跟着结果一起落盘，否则夜里失败只能看到一句「失败」。
+_store_probe = waterpost._load()
+waterpost._store_result(_store_probe, 7, make_target(9001, 42), "内容", {
+    "ok": False, "category": "需要验证码", "code": 4,
+    "reason": "需要验证码才能继续", "advice": "手动验证一次",
+    "detail": "需要验证码才能继续", "raw": "Need verify code"})
+check("结果快照保留错误码",
+      _store_probe["results"]["7:42"]["code"] == 4,
+      _store_probe["results"]["7:42"])
+check("结果快照保留「怎么办」",
+      bool(_store_probe["results"]["7:42"]["advice"]))
 
 
 def reset_config(count=3, interval=5, groups=None):

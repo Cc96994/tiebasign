@@ -39,6 +39,7 @@ CAT_ACCOUNT = "登录问题"
 CAT_CAPTCHA = "需要验证码"
 CAT_NETWORK = "网络问题"
 CAT_RISK = "被限制"
+CAT_CONTENT = "内容违规"   # 码表里没有稳定的内容违规码，由 errors 的关键词兜底
 CAT_UNKNOWN = "原因不明"
 
 #: 已知错误码 -> (分类, 原因, 怎么办)。原因/建议都按普通人能看懂的话写，

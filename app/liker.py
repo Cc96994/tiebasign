@@ -15,6 +15,12 @@
     避免“大多数吧都 3280004”；
   * 数据文件 ``<ANDROID_PRIVATE>/tiebasign_like.json``，不含 BDUSS；
   * 每日记录按账号 + 吧名，成功一次当天不再点这个吧。
+
+v0.6.0 P0（优化清单第 2 节）：
+  * 分段耗时 ``phase_ms``（拉列表 / 取帖 / 点赞前等待 / 点赞请求）随
+    ``last_runs`` 落盘——当天点过的吧重跑会 skip，只有隔天首跑的数据能
+    证明提速，所以不能只留在内存状态里；
+  * 错误分类统一走 ``app/errors.py``，失败记录保留真实错误码。
 """
 
 import asyncio
@@ -24,6 +30,7 @@ import random
 import threading
 import time
 
+import errors
 import redact
 import tieba_api
 import tieba_codes
@@ -35,6 +42,13 @@ _LIKE_DELAY = (0.25, 0.5)
 _LIKE_RETRIES = 2
 _RL_CODE = 3280004
 _RN = 30
+
+#: 分段耗时（P0-2）：拉列表 / 取帖 / 点赞前等待 / 点赞请求。
+PHASE_LIST = "list"
+PHASE_FETCH = "fetch"
+PHASE_SLEEP = "sleep"
+PHASE_AGREE = "agree"
+PHASE_LIKE = "like"
 
 _lock = threading.RLock()
 _state = None
@@ -70,6 +84,50 @@ def _save(data):
 
 def _today():
     return time.strftime("%Y-%m-%d")
+
+
+def _now_ms():
+    return int(time.time() * 1000)
+
+
+def _phase_add(sub, phase, started_ms):
+    """累加一段耗时到账号状态的 phase_ms（毫秒，并发任务是累计值）。"""
+    spent = max(0, _now_ms() - int(started_ms))
+    phases = sub.get("phase_ms")
+    if not isinstance(phases, dict):
+        phases = {}
+        sub["phase_ms"] = phases
+    phases[phase] = int(phases.get(phase) or 0) + spent
+
+
+def _persist_last_run(sub, elapsed_ms):
+    """把本轮分段耗时写进 tiebasign_like.json，重启后还能复盘。
+
+    点赞是隔天首跑才准的（当天点过的吧会被跳过），所以数据必须落盘，
+    不能只留在内存状态里。
+    """
+    try:
+        data = _load()
+        aid = sub.get("account_id")
+        if aid is None:
+            return
+        aid = str(aid)
+        runs = data.get("last_runs")
+        if not isinstance(runs, dict):
+            runs = {}
+            data["last_runs"] = runs
+        runs[aid] = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "elapsed_ms": int(elapsed_ms),
+            "total": int(sub.get("total") or 0),
+            "success": int(sub.get("success") or 0),
+            "failed": int(sub.get("failed") or 0),
+            "skipped": int(sub.get("skipped") or 0),
+            "phase_ms": dict(sub.get("phase_ms") or {}),
+        }
+        _save(data)
+    except Exception:  # noqa: BLE001 - 统计落盘失败不能影响点赞
+        pass
 
 
 def _get_forum_record(account_id, fname):
@@ -131,6 +189,7 @@ def _new_state(run_id, pairs):
             "success": 0,
             "failed": 0,
             "skipped": 0,
+            "phase_ms": {},
             "failures": [],
             "error": None,
         })
@@ -157,6 +216,7 @@ def get_state():
         for sub in _state["accounts"]:
             item = dict(sub)
             item["failures"] = list(sub["failures"])
+            item["phase_ms"] = dict(sub.get("phase_ms") or {})
             snap["accounts"].append(item)
         return snap
 
@@ -226,18 +286,8 @@ def start(pairs):
 
 
 def _describe(err):
-    code = tieba_codes.parse_code(getattr(err, "code", None))
-    raw = redact.scrub(str(getattr(err, "msg", None) or err).strip())
-    reason = tieba_codes.reason(code)
-    advice = tieba_codes.advice(code) or (
-        "稍后再试；如果一直失败，把这份签到报告发给开发者")
-    if code is None:
-        detail = "百度没有给出错误码，这个吧的点赞没有成功"
-    elif reason:
-        detail = reason
-    else:
-        detail = "百度没有给出具体原因，这个吧的点赞没有成功"
-    return code, reason, advice, detail, raw
+    """统一分类器：返回 category/code/reason/advice/detail/raw。"""
+    return errors.classify(err, subject="这个吧的点赞")
 
 
 def _bump(aid, field):
@@ -255,17 +305,16 @@ def _bump(aid, field):
                 return
 
 
-def _add_failure(sub, fname, code, reason, advice, detail):
+def _add_failure(sub, fname, info):
     with _lock:
         sub.setdefault("failures", []).append({
             "forum": redact.scrub(fname),
-            "category": tieba_codes.category_for_code(code) or
-            tieba_codes.CAT_UNKNOWN,
-            "code": code,
-            "reason": reason,
-            "advice": advice,
-            "detail": detail,
-            "raw": "",
+            "category": info["category"],
+            "code": info["code"],
+            "reason": info["reason"],
+            "advice": info["advice"],
+            "detail": info["detail"],
+            "raw": info["raw"],
         })
 
 
@@ -286,15 +335,15 @@ async def _fetch_forums(client, sub):
         res = await client.get_self_follow_forums(pn=pn, rn=200)
         rerr = getattr(res, "err", None)
         if rerr is not None:
-            code, reason, advice, detail, raw = _describe(rerr)
+            info = _describe(rerr)
             _update_account(sub["account_id"], status="error",
                             step="获取关注吧失败",
-                            error={"category":
-                                   tieba_codes.category_for_code(code) or
-                                   tieba_codes.CAT_UNKNOWN,
-                                   "code": code, "reason": reason,
-                                   "advice": advice, "detail": detail,
-                                   "raw": raw})
+                            error={"category": info["category"],
+                                   "code": info["code"],
+                                   "reason": info["reason"],
+                                   "advice": info["advice"],
+                                   "detail": info["detail"],
+                                   "raw": info["raw"]})
             return None
         for forum in res:
             forums.append(forum)
@@ -327,9 +376,15 @@ async def _like_account_async(account, bduss):
     import aiotieba
 
     aid = account["id"]
+    sub = _sub_for(aid)
+    run_started = _now_ms()
     try:
         async with aiotieba.Client(bduss) as client:
-            forums = await _fetch_forums(client, {"account_id": aid})
+            list_started = _now_ms()
+            try:
+                forums = await _fetch_forums(client, sub)
+            finally:
+                _phase_add(sub, PHASE_LIST, list_started)
             if forums is None:
                 return
             _update_account(aid, total=len(forums), status="running",
@@ -359,23 +414,23 @@ async def _like_account_async(account, bduss):
                         _bump(aid, "skipped")
                         _bump(aid, "checked")
                         return
+                    fetch_started = _now_ms()
                     try:
                         threads = await client.get_threads(fname, pn=1,
                                                            rn=_RN)
                     except Exception as exc:  # noqa: BLE001
-                        code, reason, advice, detail, raw = _describe(exc)
-                        _add_failure(_sub_for(aid), fname, code, reason,
-                                     advice, detail)
+                        info = _describe(exc)
+                        _add_failure(sub, fname, info)
                         _bump(aid, "failed")
                         _bump(aid, "checked")
                         return
+                    finally:
+                        _phase_add(sub, PHASE_FETCH, fetch_started)
                     terr = getattr(threads, "err", None)
                     if terr is not None:
-                        code, reason, advice, detail, raw = _describe(terr)
-                        _add_failure(_sub_for(aid), fname, code, reason,
-                                     advice, detail)
-                        if tieba_codes.category_for_code(code) == \
-                                tieba_codes.CAT_ACCOUNT:
+                        info = _describe(terr)
+                        _add_failure(sub, fname, info)
+                        if info["category"] == tieba_codes.CAT_ACCOUNT:
                             flags["stop"] = True
                         _bump(aid, "failed")
                         _bump(aid, "checked")
@@ -391,21 +446,28 @@ async def _like_account_async(account, bduss):
                     thread = rng.choice(pool)
                     tid = int(thread.tid)
                     title = str(getattr(thread, "title", "") or "")
-                    # 点赞接口对频率很敏感：每次请求前停 2~3.5 秒，
+                    # 点赞接口对频率很敏感：每次请求前停一小段，
                     # 3280004 再退避重试（见 _agree_with_retry）。
-                    await asyncio.sleep(rng.uniform(*_LIKE_DELAY))
-                    resp, err = await _agree_with_retry(client, tid)
+                    sleep_started = _now_ms()
+                    try:
+                        await asyncio.sleep(rng.uniform(*_LIKE_DELAY))
+                    finally:
+                        _phase_add(sub, PHASE_SLEEP, sleep_started)
+                    agree_started = _now_ms()
+                    try:
+                        resp, err = await _agree_with_retry(client, tid)
+                    finally:
+                        _phase_add(sub, PHASE_AGREE, agree_started)
                     if err is not None:
-                        code, reason, advice, detail, raw = _describe(err)
-                        _add_failure(_sub_for(aid), fname, code, reason,
-                                     advice, detail)
+                        info = _describe(err)
+                        _add_failure(sub, fname, info)
                         _record_forum(aid, fname, False, tid, title,
-                                      code, reason, advice, detail, raw)
-                        if tieba_codes.category_for_code(code) == \
-                                tieba_codes.CAT_ACCOUNT:
+                                      info["code"], info["reason"],
+                                      info["advice"], info["detail"],
+                                      info["raw"])
+                        if info["category"] == tieba_codes.CAT_ACCOUNT:
                             flags["stop"] = True
-                        if tieba_codes.parse_code(
-                                getattr(err, "code", None)) == _RL_CODE:
+                        if info["code"] == _RL_CODE:
                             flags["rate_limited"] = flags.get(
                                 "rate_limited", 0) + 1
                             if flags["rate_limited"] >= 3:
@@ -417,9 +479,17 @@ async def _like_account_async(account, bduss):
                     _bump(aid, "success")
                     _bump(aid, "checked")
 
-            await asyncio.gather(*(one(f) for f in forums))
+            like_started = _now_ms()
+            try:
+                await asyncio.gather(*(one(f) for f in forums))
+            finally:
+                _phase_add(sub, PHASE_LIKE, like_started)
             _update_account(aid, status="done", step="随机点赞完成")
     except Exception as exc:  # noqa: BLE001
         _update_account(aid, status="error", step="随机点赞异常",
                         error={"detail": "{}: {}".format(
                             type(exc).__name__, exc)})
+    finally:
+        # 当天点过的吧重跑会直接 skip，只有隔天首跑的数据才能证明提速；
+        # 所以分段耗时必须落进 tiebasign_like.json，不能只在内存里。
+        _persist_last_run(sub, _now_ms() - run_started)

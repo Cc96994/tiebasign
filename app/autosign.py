@@ -104,7 +104,8 @@ def _save(data):
 
 def _log(msg):
     try:
-        with open(os.path.join(os.getcwd(), "autosign.log"), "a",
+        with open(os.path.join(os.environ.get("ANDROID_PRIVATE")
+                               or os.getcwd(), "autosign.log"), "a",
                   encoding="utf-8") as fh:
             fh.write("[{}] {}\n".format(
                 time.strftime("%m-%d %H:%M:%S"), redact.scrub(str(msg))))

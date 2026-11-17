@@ -170,6 +170,19 @@ def test_one_like_per_forum():
           all(v.get("tid") != 1 for v in forums_data.values()), forums_data)
     check("数据文件不含 BDUSS", "bduss" not in json.dumps(data).lower())
 
+    # ---- 0.6.0 P0-2：分段耗时（phase_ms）必须能拿到并落盘 --------------
+    phases = sub.get("phase_ms") or {}
+    check("点赞 phase_ms 覆盖拉列表/取帖/等待/点赞",
+          all(k in phases for k in ("list", "fetch", "sleep", "agree")),
+          phases)
+    check("点赞 phase_ms 都是非负整数",
+          all(isinstance(v, int) and v >= 0 for v in phases.values()),
+          phases)
+    last_runs = data.get("last_runs") or {}
+    check("点赞耗时已落盘（last_runs）",
+          isinstance(last_runs.get("1"), dict)
+          and bool(last_runs["1"].get("phase_ms")), last_runs)
+
 
 def test_daily_guard_and_next_day():
     reset()

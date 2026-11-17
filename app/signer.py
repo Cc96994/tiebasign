@@ -22,6 +22,13 @@ v0.5.0 changes:
     * ``warnings`` 与 ``failures`` 分开：msign 失败不再算整体失败，后面
       逐吧补签成功就是成功（v0.4.0 曾因此误报「自动签到失败」）。
 
+v0.6.0 P0（优化清单第 2 节）:
+    * ``phase_ms`` 分段耗时：登录 / 成长签到 / msign / 关注吧列表 / 逐吧补签，
+      并拆出补签的请求与抖动累计；写进状态、``sign.log`` 和最近一次报告。
+      以后判断「改完有没有变快」只看这份数据，不靠感觉。
+    * 错误分类统一走 ``app/errors.py``；错误码原样落盘，未收录的码明确写
+      「原因不明」，不再冒充「风控」。
+
 All state lives in a module-level dict guarded by _lock; the HTTP layer polls
 GET /api/sign/state. The aiotieba coroutine runs on tieba_api's event loop
 via run_coroutine_threadsafe from a worker thread.
@@ -38,6 +45,7 @@ import random
 import threading
 import time
 
+import errors
 import redact
 import tieba_api
 import tieba_codes
@@ -46,18 +54,21 @@ _lock = threading.RLock()
 _run_counter = 0
 _state = None
 
-NETWORK_TYPE_HINTS = (
-    "ClientConnector", "ClientOSError", "ClientConnection", "ConnectionError",
-    "TimeoutError", "Timeout", "SSLCertVerificationError", "SSLError",
-    "CertificationError", "SocketError", "Socket", "OSError",
-)
-
 MAX_FORUM_PAGES = 25  # 25 * 200 = 5000 forums, far beyond realistic usage
 
 #: 同时最多几个 sign_forum 请求。取 4 是折中：串行几百个吧要几分钟；再高
 #: 会让短时间内的请求峰值更像脚本。每条请求前随机停 30~150ms 打散节奏。
 SIGN_CONCURRENCY = 4
 SIGN_JITTER = (0.03, 0.15)
+
+#: 分段耗时（P0-2）的字段名。报告/日志只认这几个 key，别再另起名字。
+PHASE_LOGIN = "login"
+PHASE_GROWTH = "growth"
+PHASE_MSIGN = "msign"
+PHASE_LIST = "list"
+PHASE_SIGN = "sign"
+PHASE_SIGN_REQUEST = "sign_request"
+PHASE_SIGN_SLEEP = "sign_sleep"
 
 _LOG_FILENAME = "sign.log"
 _REPORT_FILENAME = "tiebasign_sign_last.json"
@@ -68,6 +79,21 @@ _REPORT_WARNINGS_MAX = 50
 
 def _now_ms():
     return int(time.time() * 1000)
+
+
+def _phase_add(state, phase, started_ms):
+    """把一段耗时累加进 state["phase_ms"]（毫秒）。
+
+    逐吧补签是并发的，``sign_request`` / ``sign_sleep`` 记的是所有任务**累计**
+    耗时（可能大于墙钟）；``sign`` 记的是这一阶段的墙钟。两者配合才能看出
+    「慢在请求还是慢在抖动」。协程都在同一个事件循环里跑，字典更新不需要锁。
+    """
+    spent = max(0, _now_ms() - int(started_ms))
+    phases = state.get("phase_ms")
+    if not isinstance(phases, dict):
+        phases = {}
+        state["phase_ms"] = phases
+    phases[phase] = int(phases.get(phase) or 0) + spent
 
 
 def _data_path(filename):
@@ -109,6 +135,7 @@ def _new_state(run_id, account):
         "forum_checked": 0,
         "forum_success": 0,
         "forum_failed": 0,
+        "phase_ms": {},         # P0-2 分段耗时：登录 / msign / 列表 / 补签 ...
         "failures": [],         # [{forum,category,code,reason,detail}]
         "warnings": [],         # non-fatal: msign / 后续步骤的旁路问题
         "error": None,          # run-level fatal error
@@ -146,6 +173,10 @@ def get_state():
         else:
             snap["failures"] = list(_state["failures"])
             snap["warnings"] = list(_state["warnings"])
+        snap["phase_ms"] = dict(_state.get("phase_ms") or {})
+        if snap.get("mode") == "multi":
+            for sub, acct_snap in zip(_state["accounts"], snap["accounts"]):
+                acct_snap["phase_ms"] = dict(sub.get("phase_ms") or {})
         return snap
 
 
@@ -186,87 +217,35 @@ def start(account, bduss):
 
 
 def _classify_server_error(code, msg):
-    """优先按错误码表分类；没有码时退回中文关键词；都没有就是「未知错误」。"""
-    category = tieba_codes.category_for_code(code)
-    if category:
-        return category
-    msg_l = (msg or "").lower()
-
-    if any(k in msg_l for k in ("已经签过", "已签到", "重复签到", "签到过快")):
-        return tieba_codes.CAT_DONE
-    # server told us the credential is bad / session expired
-    if any(k in msg_l for k in ("bduss", "登录已失效", "登录失效",
-                                "用户不存在", "未登录", "账号失效",
-                                "帐号失效", "失效", "过期", "封禁",
-                                "黑名单", "实名")):
-        return tieba_codes.CAT_ACCOUNT
-    if any(k in msg_l for k in ("吧不存在", "贴吧不存在", "该吧不存在")):
-        return tieba_codes.CAT_NO_FORUM
-    # forum relationship problems
-    if any(k in msg_l for k in ("未关注", "关注该吧", "先关注",
-                                "取消关注", "非本吧会员", "会员才能")):
-        return tieba_codes.CAT_UNFOLLOWED
-    if "验证码" in msg_l:
-        return tieba_codes.CAT_CAPTCHA
-    if any(k in msg_l for k in ("风控", "太快", "目录出问题", "服务忙",
-                                "tbs")):
-        return tieba_codes.CAT_RISK
-    # 空 errmsg 或完全没见过的文案：明确写「未知」，不伪装成「风控」。
-    return tieba_codes.CAT_UNKNOWN
+    """按统一分类器分类；保留这个函数是给旧调用方/测试用的薄封装。"""
+    return errors.category_for(code, msg)
 
 
 def _err_detail(err):
     """返回 (code, detail, reason, advice, raw)。
 
     detail 给普通用户看（人话）；raw 是百度原文，只进日志/报告的技术细节；
-    advice 是「怎么办」。
+    advice 是「怎么办」。分类规则集中在 ``errors``，这里只选签到侧措辞。
     """
-    code = tieba_codes.parse_code(getattr(err, "code", None))
-    msg = getattr(err, "msg", None)
-    if msg is None:
-        msg = str(err)
-    raw = redact.scrub(str(msg).strip())
-
-    reason = tieba_codes.reason(code)
-    if code is None:
-        detail = "百度没有给出错误码，这次操作没有成功"
-        advice = "稍后再试；如果一直失败，把这份签到报告发给开发者"
-        return None, detail, None, advice, raw
-    if reason:
-        detail = reason
-        advice = tieba_codes.advice(code) or (
-            "稍后再试；如果一直失败，把这份签到报告发给开发者")
-    else:
-        detail = "百度没有给出具体原因，这次操作没有成功"
-        advice = "稍后再试；如果一直失败，把这份签到报告发给开发者"
-    return code, detail, reason, advice, raw
+    info = errors.classify(err, subject="这次操作")
+    return (info["code"], info["detail"], info["reason"], info["advice"],
+            info["raw"])
 
 
 def _classify_exception(exc):
-    name = type(exc).__name__
-    text = "{} {}".format(name, exc)
-    mro_text = " ".join(c.__name__ for c in type(exc).__mro__)
-    if any(k in mro_text or k in text for k in NETWORK_TYPE_HINTS):
-        return tieba_codes.CAT_NETWORK
-    code = getattr(exc, "code", None)
-    msg = getattr(exc, "msg", None)
-    if code is not None:
-        return _classify_server_error(code, str(msg or exc))
-    return tieba_codes.CAT_UNKNOWN
+    return errors.classify(exc)["category"]
 
 
 def _failure_item(fname, err, secret=None):
-    code, detail, reason, advice, raw = _err_detail(err)
-    category = _classify_server_error(code, str(getattr(err, "msg", None)
-                                               or err))
+    info = errors.classify(err, secret, subject="这次操作")
     return {
         "forum": redact.scrub(str(fname), secret),
-        "category": category,
-        "code": code,
-        "reason": reason,
-        "advice": advice,
-        "detail": redact.scrub(detail, secret),
-        "raw": redact.scrub(raw, secret),
+        "category": info["category"],
+        "code": info["code"],
+        "reason": info["reason"],
+        "advice": info["advice"],
+        "detail": info["detail"],
+        "raw": info["raw"],
     }
 
 
@@ -295,6 +274,7 @@ async def _sign_growth_step(client, state, secret=None):
     一个**旁路步骤**接入：成功加分，失败只记 warning，绝不拖累吧签到结果。
     """
     _update_in(state, step="成长等级签到")
+    started = _now_ms()
     try:
         resp = await client.sign_growth()
     except Exception as exc:  # noqa: BLE001 - 旁路步骤失败不影响主流程
@@ -306,6 +286,8 @@ async def _sign_growth_step(client, state, secret=None):
         _log("growth failed code={} detail={}".format(
             item["code"], item["detail"]), secret)
         return
+    finally:
+        _phase_add(state, PHASE_GROWTH, started)
 
     err = getattr(resp, "err", None)
     if err is None:
@@ -356,8 +338,16 @@ async def _sign_forums(client, state, forums, secret=None):
                 async with sem:
                     delay = random.uniform(jitter_lo, jitter_hi)
                     if delay > 0:
-                        await asyncio.sleep(delay)
-                    resp = await client.sign_forum(fname)
+                        sleep_started = _now_ms()
+                        try:
+                            await asyncio.sleep(delay)
+                        finally:
+                            _phase_add(state, PHASE_SIGN_SLEEP, sleep_started)
+                    request_started = _now_ms()
+                    try:
+                        resp = await client.sign_forum(fname)
+                    finally:
+                        _phase_add(state, PHASE_SIGN_REQUEST, request_started)
                 rerr = getattr(resp, "err", None)
                 if rerr is None:
                     state["forum_success"] += 1
@@ -384,7 +374,11 @@ async def _sign_async(state, bduss):
             state.get("account_mask")), secret)
         async with aiotieba.Client(bduss) as client:
             # ---- 1. account validity gate --------------------------------
-            user = await client.get_self_info()
+            login_started = _now_ms()
+            try:
+                user = await client.get_self_info()
+            finally:
+                _phase_add(state, PHASE_LOGIN, login_started)
             uerr = getattr(user, "err", None)
             if uerr is not None:
                 item = _failure_item("账号验证", uerr, secret)
@@ -408,7 +402,11 @@ async def _sign_async(state, bduss):
             # ---- 2. Baidu web one-key sign (msign) -----------------------
             _update_in(state, step="网页一键签到")
             _log("run={} msign start".format(state.get("run_id")), secret)
-            msign = await client.sign_forums()
+            msign_started = _now_ms()
+            try:
+                msign = await client.sign_forums()
+            finally:
+                _phase_add(state, PHASE_MSIGN, msign_started)
             merr = getattr(msign, "err", None)
             if merr is None:
                 _update_in(state, msign={"status": "success",
@@ -440,7 +438,11 @@ async def _sign_async(state, bduss):
             forums = []
             pn = 1
             while pn <= MAX_FORUM_PAGES:
-                res = await client.get_self_follow_forums(pn=pn, rn=200)
+                page_started = _now_ms()
+                try:
+                    res = await client.get_self_follow_forums(pn=pn, rn=200)
+                finally:
+                    _phase_add(state, PHASE_LIST, page_started)
                 rerr = getattr(res, "err", None)
                 if rerr is not None:
                     item = _failure_item("获取关注吧列表", rerr, secret)
@@ -473,27 +475,31 @@ async def _sign_async(state, bduss):
                 max(1, int(SIGN_CONCURRENCY))), secret)
 
             # ---- 4. sign each still-unsigned forum (single attempt) ------
-            await _sign_forums(client, state, to_sign, secret)
+            sign_started = _now_ms()
+            try:
+                await _sign_forums(client, state, to_sign, secret)
+            finally:
+                _phase_add(state, PHASE_SIGN, sign_started)
 
             _update_in(state, status="done", step="签到完成",
                        finished_at=_now_ms())
-            _log("run={} done success={} failed={} warnings={} elapsed_ms={}".format(
-                state.get("run_id"), state.get("forum_success"),
-                state.get("forum_failed"), len(state.get("warnings") or []),
-                (state.get("finished_at") or _now_ms())
-                - (state.get("started_at") or _now_ms())), secret)
+            _log("run={} done success={} failed={} warnings={} elapsed_ms={} "
+                 "phase_ms={}".format(
+                     state.get("run_id"), state.get("forum_success"),
+                     state.get("forum_failed"),
+                     len(state.get("warnings") or []),
+                     (state.get("finished_at") or _now_ms())
+                     - (state.get("started_at") or _now_ms()),
+                     json.dumps(state.get("phase_ms") or {},
+                                ensure_ascii=False, sort_keys=True)), secret)
     except Exception as exc:  # noqa: BLE001
-        category = _classify_exception(exc)
+        info = errors.classify(exc, secret, subject="这次签到")
+        category = info["category"]
+        code = info["code"]
+        reason = info["reason"]
+        detail = info["detail"]
+        advice = info["advice"]
         raw = redact.scrub("{}: {}".format(type(exc).__name__, exc), secret)
-        code = tieba_codes.parse_code(getattr(exc, "code", None))
-        reason = tieba_codes.reason(code)
-        if category == tieba_codes.CAT_NETWORK:
-            detail = "网络连接出了问题，这次签到没有完成"
-            advice = "检查网络后重试；如果一直失败，把这份签到报告发给开发者"
-        else:
-            detail = reason or "签到过程中出现了异常，这次没有完成"
-            advice = tieba_codes.advice(code) or (
-                "稍后再试；如果一直失败，把这份签到报告发给开发者")
         _update_in(state, status="error", step="签到异常",
                    finished_at=_now_ms(),
                    error={"category": category,
@@ -522,6 +528,7 @@ def _snapshot_for_report(state):
         "finished_at": state.get("finished_at"),
         "elapsed_ms": ((state.get("finished_at") or _now_ms())
                        - (state.get("started_at") or _now_ms())),
+        "phase_ms": dict(state.get("phase_ms") or {}),
     }
     if snap["mode"] == "multi":
         accounts = []
@@ -538,6 +545,7 @@ def _snapshot_for_report(state):
                 "forum_checked": sub.get("forum_checked"),
                 "forum_success": sub.get("forum_success"),
                 "forum_failed": sub.get("forum_failed"),
+                "phase_ms": dict(sub.get("phase_ms") or {}),
                 "failures": list(sub.get("failures") or [])[:_REPORT_FAILURES_MAX],
                 "warnings": list(sub.get("warnings") or [])[:_REPORT_WARNINGS_MAX],
                 "error": sub.get("error"),
@@ -623,6 +631,44 @@ def _fmt_growth(growth):
     return "成长等级签到：没成功（{}）".format(detail)
 
 
+_PHASE_LABELS = (
+    (PHASE_LOGIN, "登录"),
+    (PHASE_GROWTH, "成长签到"),
+    (PHASE_MSIGN, "网页一键签到"),
+    (PHASE_LIST, "关注吧列表"),
+    (PHASE_SIGN, "逐吧补签"),
+)
+
+
+def _fmt_seconds(ms):
+    return "{:.1f} 秒".format(int(ms) / 1000.0)
+
+
+def _fmt_phase_ms(phases):
+    """把 phase_ms 变成报告里的若干行；老报告没有这个字段就返回空列表。"""
+    if not isinstance(phases, dict) or not phases:
+        return []
+    parts = []
+    for key, label in _PHASE_LABELS:
+        ms = phases.get(key)
+        if isinstance(ms, int) and ms >= 0:
+            parts.append("{} {}".format(label, _fmt_seconds(ms)))
+    if not parts:
+        return []
+    lines = ["分段耗时：" + " / ".join(parts)]
+    detail = []
+    request_ms = phases.get(PHASE_SIGN_REQUEST)
+    sleep_ms = phases.get(PHASE_SIGN_SLEEP)
+    if isinstance(request_ms, int) and request_ms >= 0:
+        detail.append("请求 {}".format(_fmt_seconds(request_ms)))
+    if isinstance(sleep_ms, int) and sleep_ms >= 0:
+        detail.append("抖动 {}".format(_fmt_seconds(sleep_ms)))
+    if detail:
+        lines.append("补签明细：{}（并发任务累计，可能大于墙钟）".format(
+            " + ".join(detail)))
+    return lines
+
+
 def _report_lines_for_account(label, acct):
     lines = []
     name = acct.get("account_name") or "贴吧账号"
@@ -640,6 +686,9 @@ def _report_lines_for_account(label, acct):
             acct.get("forum_total") or 0,
             acct.get("forum_success") or 0,
             acct.get("forum_failed") or 0))
+    phase_lines = _fmt_phase_ms(acct.get("phase_ms"))
+    for phase_line in phase_lines:
+        lines.append("  " + phase_line)
     error = acct.get("error")
     if error:
         lines.append("  整体错误：{}".format(_fmt_failure({

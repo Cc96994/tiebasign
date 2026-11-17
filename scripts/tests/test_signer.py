@@ -346,6 +346,28 @@ def test_signer_flow():
     check("报告文本不含完整 BDUSS", FAKE_BDUSS not in text)
     check("报告文本说明不含完整 BDUSS", "不含完整 BDUSS" in text)
 
+    # ---- 0.6.0 P0-2：phase_ms 分段耗时 --------------------------------
+    phases = state.get("phase_ms") or {}
+    check("phase_ms 覆盖登录/msign/列表/补签",
+          all(k in phases for k in ("login", "msign", "list", "sign")),
+          phases)
+    check("phase_ms 都是非负整数",
+          all(isinstance(v, int) and v >= 0 for v in phases.values()),
+          phases)
+    check("phase_ms 记录签到请求耗时", "sign_request" in phases, phases)
+    report_obj = json.loads(report_json) if report_json else {}
+    check("最近报告包含 phase_ms",
+          isinstance(report_obj.get("phase_ms"), dict)
+          and bool(report_obj["phase_ms"]), report_obj.get("phase_ms"))
+    check("报告文本有分段耗时", "分段耗时" in text and "登录" in text, text)
+    check("sign.log 记录 phase_ms", "phase_ms=" in log_text)
+    line = signer._fmt_phase_ms({"login": 1200, "msign": 3000, "list": 400,
+                                 "sign": 9000, "sign_request": 8000,
+                                 "sign_sleep": 900})
+    check("分段耗时格式化",
+          isinstance(line, list) and len(line) == 2
+          and "登录 1.2 秒" in line[0] and "补签明细" in line[1], line)
+
 
 def test_msign_warning():
     reset_files()
@@ -460,6 +482,9 @@ def test_autosign_warning_not_failure():
     import autosign
 
     reset_files()
+    autosign._log("selftest log path")
+    check("autosign.log 落在 ANDROID_PRIVATE",
+          os.path.exists(os.path.join(_PRIVATE, "autosign.log")))
     notified = []
     autosign.notify_fail = lambda *a: notified.append(a)
     account = {"id": 1, "name": "测试账号", "mask": "AbCd****TEST"}
