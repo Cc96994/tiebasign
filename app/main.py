@@ -521,7 +521,9 @@ def _page_sign():
         "手动签到失败不会发系统通知、不显示红点。</div>"
         "<div class='btn-row' style='margin-top:12px'>"
         "<button class='btn btn-primary' id='sign_btn' type='button'>"
-        "开始一键签到</button></div>"
+        "开始一键签到</button>"
+        "<button class='btn btn-ghost' id='sign_pause_btn' type='button' "
+        "style='display:none'>暂停</button></div>"
         "<div class='hint' style='margin-top:10px'>"
         "<a href='/sign/report'>查看 / 复制最近一次签到报告</a></div></div>"
         "<div id='sign_state'></div>"
@@ -531,6 +533,8 @@ def _page_sign():
         "<div class='btn-row' style='margin-top:12px'>"
         "<button class='btn btn-primary' id='like_btn' type='button'>"
         "开始随机点赞</button>"
+        "<button class='btn btn-ghost' id='like_pause_btn' type='button' "
+        "style='display:none'>暂停</button>"
         "<a class='btn btn-ghost' href='/settings/like'>设置</a></div></div>"
         "<div id='like_state'></div>"
         "<div class='card'><div class='title'>吧群签到</div>"
@@ -627,6 +631,8 @@ def _page_settings():
         "<span>自动签到设置</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/sign'>"
         "<span>签到速度档位</span><span class='arrow'>›</span></a>"
+        "<a class='menu-item' href='/settings/invalid'>"
+        "<span>失效贴吧</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/waterpost'>"
         "<span>自动水贴设置</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/groupsign'>"
@@ -635,7 +641,7 @@ def _page_settings():
         "<span>随机点赞设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.6.1 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.6.2 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -965,6 +971,57 @@ def _page_settings_sign():
         "</main>"
     )
     return _page("签到速度", body + _tier_script("sign", st), "settings")
+
+
+def _page_settings_invalid():
+    """失效贴吧：手动标记后签到/点赞自动跳过（0.6.2 用户反馈）。"""
+    import invalid
+
+    names = invalid.list_forums()
+    rows = []
+    for name in names:
+        rows.append(
+            "<div class='menu-item'><span>{}</span>"
+            "<button class='btn btn-ghost btn-small' type='button' "
+            "onclick='tierRemoveForum({})'>删除</button></div>".format(
+                html.escape(name), html.escape(json.dumps(name))))
+    if not rows:
+        rows.append("<div class='hint'>还没有标记失效的吧。</div>")
+    body = (
+        "<div class='topbar'>失效贴吧</div><main>"
+        "<div class='card'><div class='title'>说明</div>"
+        "<div class='hint'>有的吧已经被查封/关闭，但账号还关注着它，签到和点赞"
+        "会一直报错。把吧名加到这里，之后签到和点赞会直接跳过它，不报错。</div>"
+        "</div>"
+        "<div class='card'><div class='title'>标记失效吧</div>"
+        "<div class='form'><label>吧名（不带「吧」字也可以）</label>"
+        "<input class='input' id='bad_forum_name' maxlength='40' "
+        "placeholder='例如：摄影'></div>"
+        "<button class='btn btn-primary' type='button' "
+        "onclick='tierAddForum()'>添加</button>"
+        "<div class='errorbox' id='bad_err'></div></div>"
+        "<div class='card'><div class='title'>已标记（{}）</div>{}</div>"
+        "</main>"
+    ).format(len(names), "".join(rows))
+    script = """
+<script>
+function badErr(s){var e=document.getElementById('bad_err');
+e.style.display='block';e.textContent=s;}
+function badPost(action,name){
+ fetch('/api/invalid',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({action:action,name:name})})
+ .then(function(r){return r.json();}).then(function(j){
+  if(j.ok){location.reload();}else{badErr(j.detail||'保存失败');}})
+ .catch(function(e){badErr('请求失败：'+e);});}
+function tierAddForum(){
+ var el=document.getElementById('bad_forum_name');
+ var name=(el.value||'').trim();
+ if(!name){badErr('先输入吧名');return;}
+ badPost('add',name);}
+function tierRemoveForum(name){badPost('remove',name);}
+</script>
+"""
+    return _page("失效贴吧", body + script, "settings")
 
 
 def _page_settings_like():
@@ -1769,6 +1826,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 _send_html(self, _page_settings_like())
             elif path == "/settings/sign":
                 _send_html(self, _page_settings_sign())
+            elif path == "/settings/invalid":
+                _send_html(self, _page_settings_invalid())
             elif path == "/settings/update":
                 # 进入这一页就算看过了：红点清掉（与签到页同样的约定）。
                 # 没查到东西时这里本来也没红点，所以清不清都一样。
@@ -1806,6 +1865,10 @@ class AppHandler(BaseHTTPRequestHandler):
             elif path == "/api/accounts":
                 _send_json(self, {"ok": True,
                                   "accounts": storage.list_accounts()})
+            elif path == "/api/invalid":
+                import invalid
+                _send_json(self, {"ok": True,
+                                  "forums": invalid.list_forums()})
             elif path == "/api/sign/state":
                 _send_json(self, {"ok": True, "state": signer.get_state()})
             elif path == "/api/like/state":
@@ -1859,6 +1922,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._api_sign_settings(data)
             elif path == "/api/like/settings":
                 self._api_like_settings(data)
+            elif path == "/api/sign/pause":
+                self._api_sign_pause(data)
+            elif path == "/api/like/pause":
+                self._api_like_pause(data)
+            elif path == "/api/invalid":
+                self._api_invalid(data)
             elif path == "/api/auto/run-now":
                 self._api_auto_run_now()
             elif path == "/api/waterpost/settings":
@@ -2230,6 +2299,38 @@ class AppHandler(BaseHTTPRequestHandler):
 
     # ---- 吧群签到 -----------------------------------------------------
 
+    def _api_sign_pause(self, data):
+        paused = bool((data or {}).get("paused"))
+        now = signer.set_paused(paused)
+        _send_json(self, {"ok": True, "paused": now})
+
+    def _api_like_pause(self, data):
+        paused = bool((data or {}).get("paused"))
+        now = liker.set_paused(paused)
+        _send_json(self, {"ok": True, "paused": now})
+
+    def _api_invalid(self, data):
+        import invalid
+
+        action = str((data or {}).get("action") or "").strip()
+        name = (data or {}).get("name")
+        try:
+            if action == "add":
+                forums = invalid.add_forum(name)
+            elif action == "remove":
+                forums = invalid.remove_forum(name)
+            else:
+                _send_json(self, {"ok": False, "detail": "未知操作"})
+                return
+        except ValueError as exc:
+            _send_json(self, {"ok": False, "detail": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            _send_json(self, {"ok": False,
+                              "detail": "保存失败：{}".format(exc)})
+            return
+        _send_json(self, {"ok": True, "forums": forums})
+
     def _api_sign_settings(self, data):
         try:
             settings = signer.save_settings(data)
@@ -2486,6 +2587,7 @@ _JS_SIGN = """
 <script>
 var CAT_COLOR = {"已签到":"#E8930C", "未关注":"#E8930C",
   "吧不存在":"#E5484D", "登录问题":"#E5484D", "需要验证码":"#E5484D",
+  "吧已查封":"#8A90A0",
   "网络问题":"#E5484D", "被限制":"#E5484D", "原因不明":"#E5484D"};
 function escTxt(s){
   var d=document.createElement('div');
@@ -2572,6 +2674,14 @@ function renderSingle(s){
   if(s.forum_skipped>0){
     html+='<div class="hint" style="color:#E5484D;margin-top:4px">已跳过 '+
       s.forum_skipped+' 个吧（风控即停，未执行补签）</div>';
+  }
+  if(s.forum_banned>0){
+    html+='<div class="hint" style="color:#8A90A0;margin-top:4px">已跳过 '+
+      s.forum_banned+' 个吧（已查封/关闭，不计失败）</div>';
+  }
+  if(s.forum_invalid>0){
+    html+='<div class="hint" style="color:#8A90A0;margin-top:4px">已跳过 '+
+      s.forum_invalid+' 个吧（手动标记的失效吧）</div>';
   }
   if(s.status==='done'){
     html+='<div style="display:flex;gap:10px;margin-top:14px">';
@@ -2662,6 +2772,14 @@ function renderMulti(s){
         html+='<div class="hint" style="color:#E5484D;margin-top:4px">已跳过 '+
           (a.forum_skipped||0)+' 个吧（风控即停）</div>';
       }
+      if((a.forum_banned||0)>0){
+        html+='<div class="hint" style="color:#8A90A0;margin-top:4px">已跳过 '+
+          (a.forum_banned||0)+' 个吧（已查封/关闭，不计失败）</div>';
+      }
+      if((a.forum_invalid||0)>0){
+        html+='<div class="hint" style="color:#8A90A0;margin-top:4px">已跳过 '+
+          (a.forum_invalid||0)+' 个吧（手动标记的失效吧）</div>';
+      }
       if(a.status==='done'){
         html+='<div class="hint" style="margin-top:6px">补签成功 '+
           (a.forum_success||0)+' · 补签失败 '+(a.forum_failed||0)+
@@ -2724,6 +2842,13 @@ function renderMulti(s){
 function renderSignState(s){
   var btn=document.getElementById('sign_btn');
   var box=document.getElementById('sign_state');
+  var sp=document.getElementById('sign_pause_btn');
+  if(sp){
+    if(s && (s.status==='starting'||s.status==='running')){
+      sp.style.display='';sp.textContent=s.paused?'继续':'暂停';
+    }else{sp.style.display='none';}
+  }
+  window._signState=s;
   if(!s || s.status==='idle'){
     box.innerHTML='<div class="card"><div class="hint">点击「开始一键签到」，'+
       '结果会实时显示在这里。手动签到失败不会发通知、不显示红点。</div></div>';
@@ -2768,6 +2893,21 @@ document.getElementById('sign_btn').addEventListener('click',function(){
 });
 pollSign();
 setInterval(pollSign,1000);
+function tierTogglePause(stateKey, api, poll){
+  var s=window[stateKey]; if(!s){return;}
+  fetch(api,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({paused:!s.paused})})
+  .then(function(r){return r.json();})
+  .then(function(j){if(j.ok){poll();}}).catch(function(){});
+}
+(function(){
+  var spb=document.getElementById('sign_pause_btn');
+  if(spb){spb.addEventListener('click',function(){
+    tierTogglePause('_signState','/api/sign/pause',pollSign);});}
+  var lpb=document.getElementById('like_pause_btn');
+  if(lpb){lpb.addEventListener('click',function(){
+    tierTogglePause('_likeState','/api/like/pause',pollLike);});}
+})();
 
 /* ---- 一键水贴：手动立即发一轮，进度轮询显示 ---- */
 function renderWpState(s){
@@ -2925,6 +3065,13 @@ function renderLikeState(s){
   var btn=document.getElementById('like_btn');
   var box=document.getElementById('like_state');
   if(!btn||!box){return;}
+  var lp=document.getElementById('like_pause_btn');
+  if(lp){
+    if(s && (s.status==='starting'||s.status==='running')){
+      lp.style.display='';lp.textContent=s.paused?'继续':'暂停';
+    }else{lp.style.display='none';}
+  }
+  window._likeState=s;
   if(!s||s.status==='idle'){
     box.innerHTML='<div class="card"><div class="hint">点击「开始随机点赞」，'+
       '会为每个关注的吧随机抽 1 个帖子点主楼赞；每个吧每天最多一次，'+
@@ -2951,6 +3098,8 @@ function renderLikeState(s){
       '<div class="hint">'+escTxt(a.step||'')+' · 已检查 '+(a.checked||0)+' / '+
       (a.total||0)+' · 成功 '+(a.success||0)+' · 跳过 '+(a.skipped||0)+
       ' · 失败 '+(a.failed||0)+'</div>'+
+      ((a.invalid_skipped||0)>0?'<div class="hint">已跳过 '+
+        (a.invalid_skipped||0)+' 个手动标记的失效吧</div>':'')+
       moduleFailures(a.failures)+
       (a.error?'<div class="hint" style="color:#E5484D">'+escTxt(a.error.detail||'')+'</div>':'')+
       '</div>';

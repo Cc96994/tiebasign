@@ -40,8 +40,10 @@ _ACCOUNT_HINTS = ("bduss", "登录已失效", "登录失效", "用户不存在",
 _NO_FORUM_HINTS = ("吧不存在", "贴吧不存在", "该吧不存在")
 _UNFOLLOWED_HINTS = ("未关注", "关注该吧", "先关注", "取消关注", "非本吧会员",
                      "会员才能")
+_FORUM_BANNED_HINTS = ("查封", "已被关闭", "吧已关闭", "该吧已关闭",
+                       "目录出问题", "贴吧目录")
 _RISK_HINTS = ("风控", "太快", "过快", "频繁", "限制", "禁言", "异常操作",
-               "目录出问题", "服务忙", "tbs", "操作过频")
+               "服务忙", "tbs", "操作过频")
 
 DEFAULT_ADVICE = "稍后再试；如果一直失败，把这份签到报告发给开发者"
 NETWORK_ADVICE = "检查网络后重试；如果一直失败，把这份签到报告发给开发者"
@@ -74,6 +76,8 @@ def _keyword_category(message):
         return tieba_codes.CAT_NO_FORUM
     if any(k in msg for k in _UNFOLLOWED_HINTS):
         return tieba_codes.CAT_UNFOLLOWED
+    if any(k in msg for k in _FORUM_BANNED_HINTS):
+        return tieba_codes.CAT_FORUM_BANNED
     if any(k in low for k in _RISK_HINTS):
         return tieba_codes.CAT_RISK
     # 空 errmsg 或完全没见过的文案：明确返回 None，由调用方落到「原因不明」。

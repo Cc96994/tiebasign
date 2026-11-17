@@ -57,6 +57,7 @@ import threading
 import time
 
 import errors
+import invalid
 import redact
 import tieba_api
 import tieba_codes
@@ -65,6 +66,8 @@ import tiers
 _lock = threading.RLock()
 _run_counter = 0
 _state = None
+#: 手动暂停（0.6.2 用户反馈）：set 时不再发新的补签请求，进行中的请求照常完成。
+_pause = threading.Event()
 
 MAX_FORUM_PAGES = 25  # 25 * 200 = 5000 forums, far beyond realistic usage
 
@@ -213,6 +216,9 @@ def _new_state(run_id, account):
         "forum_done": 0,        # 补签时服务端返回「今天已签到」，不算失败
         "forum_failed": 0,
         "forum_skipped": 0,     # M3b：硬停后跳过的吧
+        "forum_banned": 0,      # 0.6.2：吧已查封/关闭，跳过不算失败
+        "forum_invalid": 0,     # 0.6.2：手动标记的失效吧，直接跳过
+        "paused": False,        # 0.6.2：用户手动暂停
         "breaker": None,        # M3b：熔断降档信息
         "hard_stopped": None,   # M3b：硬停原因
         "phase_ms": {},         # P0-2 分段耗时：登录 / msign / 列表 / 补签 ...
@@ -229,6 +235,29 @@ def _update(**kwargs):
         if _state is None:
             return
         _state.update(kwargs)
+
+
+def is_paused():
+    return _pause.is_set()
+
+
+def set_paused(paused):
+    """手动暂停/继续：只停新的补签请求，进行中的请求会自然完成。"""
+    if paused:
+        _pause.set()
+    else:
+        _pause.clear()
+    paused = bool(paused)
+    with _lock:
+        if _state is not None and _state.get("status") in ("starting",
+                                                           "running"):
+            _state["paused"] = paused
+            if _state.get("mode") == "multi":
+                for sub in _state.get("accounts") or []:
+                    if sub.get("status") in ("pending", "running"):
+                        sub["paused"] = paused
+                        sub["step"] = "已暂停" if paused else "逐吧补签"
+    return paused
 
 
 def _append_failure(item):
@@ -271,6 +300,7 @@ def start(account, bduss):
         _run_counter += 1
         run_id = "r{:d}".format(_run_counter)
         state = _new_state(run_id, account)
+        _pause.clear()
         _state = state
 
     def _worker():
@@ -456,8 +486,14 @@ async def _sign_forums(client, state, forums, secret=None, concurrency=None,
 
     def _progress():
         # S3：进度每个吧都刷一次；这里只是内存状态，没有额外 IO。
-        _update_in(state, step="逐吧补签 {}/{}".format(
-            state["forum_checked"], total))
+        # 0.6.2：把当前并发也写上，用户能直接看到档位是否生效。
+        _update_in(state, step="逐吧补签 {}/{}（并发 {}）{}".format(
+            state["forum_checked"], total, gate.limit,
+            "（已暂停）" if _pause.is_set() else ""))
+
+    async def _wait_if_paused():
+        while _pause.is_set() and not run["stop"]:
+            await asyncio.sleep(0.2)
 
     async def _one(forum):
         fname = str(getattr(forum, "fname", "") or "")
@@ -471,6 +507,10 @@ async def _sign_forums(client, state, forums, secret=None, concurrency=None,
             state["forum_skipped"] += 1
             return
         try:
+            await _wait_if_paused()
+            if run["stop"]:
+                state["forum_skipped"] += 1
+                return
             # S5：抖动放在并发槽**外面**，不占着槽位睡觉。
             delay = random.uniform(jitter_lo, jitter_hi)
             if delay > 0:
@@ -480,6 +520,7 @@ async def _sign_forums(client, state, forums, secret=None, concurrency=None,
                 finally:
                     _phase_add(state, PHASE_SIGN_SLEEP, sleep_started)
             async with gate:
+                await _wait_if_paused()
                 if run["stop"]:
                     state["forum_skipped"] += 1
                     return
@@ -500,7 +541,6 @@ async def _sign_forums(client, state, forums, secret=None, concurrency=None,
                         state.get("run_id"), item["forum"],
                         item["code"]), secret)
                 else:
-                    _append_failure_in(state, item)
                     _log("run={} forum={} code={} category={} reason={} "
                          "detail={} raw={}".format(
                              state.get("run_id"), item["forum"],
@@ -508,27 +548,34 @@ async def _sign_forums(client, state, forums, secret=None, concurrency=None,
                              item["reason"], item["detail"],
                              item["raw"]), secret)
                     category = item["category"]
-                    if category in (tieba_codes.CAT_CAPTCHA,
-                                    tieba_codes.CAT_ACCOUNT):
-                        _hard_stop(item, "需要验证码/登录问题")
-                    elif category == tieba_codes.CAT_RISK:
-                        if run["breaker"] is None and tier.level > 0:
-                            # 熔断降档：不停，压到保守档继续。
-                            run["breaker"] = {
-                                "from_level": tier.level,
-                                "from_name": tier.name,
-                                "to_level": 0,
-                                "trigger_code": item["code"],
-                                "trigger_forum": item["forum"],
-                                "remaining_at_trigger": max(
-                                    0, total - state["forum_checked"]),
-                            }
-                            await gate.set_limit(
-                                tiers.get(0).sign_concurrency)
-                            _log("run={} breaker: {} -> 保守档".format(
-                                state.get("run_id"), tier.name), secret)
-                        else:
-                            _hard_stop(item, "在保守档仍然被限流")
+                    if category == tieba_codes.CAT_FORUM_BANNED:
+                        # 0.6.2：吧已查封/关闭不是账号被限流，直接跳过、
+                        # 不计失败，也不触发熔断/硬停。
+                        state["forum_banned"] += 1
+                    else:
+                        _append_failure_in(state, item)
+                        if category in (tieba_codes.CAT_CAPTCHA,
+                                        tieba_codes.CAT_ACCOUNT):
+                            _hard_stop(item, "需要验证码/登录问题")
+                        elif category == tieba_codes.CAT_RISK:
+                            if run["breaker"] is None and tier.level > 0:
+                                # 熔断降档：不停，压到保守档继续。
+                                run["breaker"] = {
+                                    "from_level": tier.level,
+                                    "from_name": tier.name,
+                                    "to_level": 0,
+                                    "trigger_code": item["code"],
+                                    "trigger_forum": item["forum"],
+                                    "remaining_at_trigger": max(
+                                        0, total - state["forum_checked"]),
+                                }
+                                await gate.set_limit(
+                                    tiers.get(0).sign_concurrency)
+                                _log("run={} breaker: {} -> 保守档".format(
+                                    state.get("run_id"),
+                                    tier.name), secret)
+                            else:
+                                _hard_stop(item, "在保守档仍然被限流")
         except Exception as exc:  # noqa: BLE001 - 单个吧失败不拖垮整轮
             _record_forum_failure(state, fname, exc, secret)
         state["forum_checked"] += 1
@@ -686,6 +733,11 @@ async def _sign_async(state, bduss):
             forums = await _fetch_follow_forums(client, state, secret)
             if forums is None:
                 return
+            forums, invalid_skipped = invalid.filter_forums(forums)
+            if invalid_skipped:
+                state["forum_invalid"] = invalid_skipped
+                _log("run={} skip {} invalid forum(s)".format(
+                    state.get("run_id"), invalid_skipped), secret)
 
             to_sign = [f for f in forums if not bool(getattr(f, "is_signed",
                                                              False))]
@@ -791,6 +843,9 @@ def _snapshot_for_report(state):
                 "forum_done": sub.get("forum_done"),
                 "forum_failed": sub.get("forum_failed"),
                 "forum_skipped": sub.get("forum_skipped"),
+                "forum_banned": sub.get("forum_banned"),
+                "forum_invalid": sub.get("forum_invalid"),
+                "paused": sub.get("paused"),
                 "breaker": sub.get("breaker"),
                 "hard_stopped": sub.get("hard_stopped"),
                 "phase_ms": dict(sub.get("phase_ms") or {}),
@@ -816,6 +871,9 @@ def _snapshot_for_report(state):
             "forum_done": state.get("forum_done"),
             "forum_failed": state.get("forum_failed"),
             "forum_skipped": state.get("forum_skipped"),
+            "forum_banned": state.get("forum_banned"),
+            "forum_invalid": state.get("forum_invalid"),
+            "paused": state.get("paused"),
             "breaker": state.get("breaker"),
             "hard_stopped": state.get("hard_stopped"),
             "failures": list(state.get("failures") or [])[:_REPORT_FAILURES_MAX],
@@ -955,6 +1013,12 @@ def _report_lines_for_account(label, acct):
     skipped = acct.get("forum_skipped") or 0
     if skipped:
         lines.append("  已跳过 {} 个吧（风控即停，未执行补签）".format(skipped))
+    if acct.get("forum_banned"):
+        lines.append("  已跳过 {} 个吧（已查封/关闭，不计失败）".format(
+            acct.get("forum_banned")))
+    if acct.get("forum_invalid"):
+        lines.append("  已跳过 {} 个吧（手动标记的失效吧）".format(
+            acct.get("forum_invalid")))
     breaker = acct.get("breaker")
     if breaker:
         lines.append("  限流熔断：{} 已自动降到「保守」档；触发时还剩 {} 个吧".format(
@@ -1081,6 +1145,7 @@ def start_multi(pairs):
         _run_counter += 1
         run_id = "m{:d}".format(_run_counter)
         batch = _new_batch(run_id, pairs)
+        _pause.clear()
         _state = batch
 
     def _worker():

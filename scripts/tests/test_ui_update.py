@@ -197,6 +197,15 @@ def page_content_checks():
           "/settings/groupsign" in main._page_settings())
     check("设置页有「签到速度档位」入口",
           "/settings/sign" in main._page_settings())
+    check("设置页有「失效贴吧」入口",
+          "/settings/invalid" in main._page_settings())
+    check("签到页有暂停按钮",
+          "sign_pause_btn" in main._JS_SIGN
+          and "like_pause_btn" in main._JS_SIGN)
+    invalid_page = main._page_settings_invalid()
+    check("失效贴吧页可渲染且含添加控件",
+          "id='bad_forum_name'" in invalid_page
+          and "已标记" in invalid_page, invalid_page[:200])
     sign_tier_page = main._page_settings_sign()
     check("签到速度页有滑块与折叠风险提示",
           "id='tier_sign'" in sign_tier_page
@@ -365,6 +374,31 @@ def http_checks():
               and body["settings"]["level"] == 4, body)
         post("/api/sign/settings", {"level": 1})
         post("/api/like/settings", {"level": 1})
+        status, invalid_page = get("/settings/invalid")
+        check("GET /settings/invalid 200",
+              status == 200 and "id='bad_forum_name'" in invalid_page)
+        status, body = post("/api/invalid", {
+            "action": "add", "name": "测试失效吧"})
+        check("失效贴吧可添加",
+              status == 200 and body["ok"] is True
+              and "测试失效吧" in body["forums"], body)
+        status, raw = get("/api/invalid")
+        check("失效贴吧可读取",
+              status == 200 and "测试失效吧" in json.loads(raw)["forums"])
+        status, body = post("/api/invalid", {
+            "action": "remove", "name": "测试失效吧"})
+        check("失效贴吧可删除",
+              status == 200 and "测试失效吧" not in body["forums"], body)
+        status, body = post("/api/sign/pause", {"paused": True})
+        check("签到暂停接口",
+              status == 200 and body["ok"] is True
+              and body["paused"] is True, body)
+        post("/api/sign/pause", {"paused": False})
+        status, body = post("/api/like/pause", {"paused": True})
+        check("点赞暂停接口",
+              status == 200 and body["ok"] is True
+              and body["paused"] is True, body)
+        post("/api/like/pause", {"paused": False})
         status, body = get("/api/update/state")
         state = json.loads(body)["state"]
         check("GET /api/update/state 200",

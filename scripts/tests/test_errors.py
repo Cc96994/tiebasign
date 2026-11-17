@@ -69,6 +69,15 @@ def test_codes():
     info = errors.classify(FakeErr(160002, ""))
     check("160002 分类=已签到", info["category"] == tieba_codes.CAT_DONE,
           info)
+    info = errors.classify(FakeErr(340006, ""))
+    check("340006 分类=吧已查封",
+          info["category"] == tieba_codes.CAT_FORUM_BANNED, info)
+    info = errors.classify(FakeErr(340001, ""))
+    check("340001 分类=吧已查封",
+          info["category"] == tieba_codes.CAT_FORUM_BANNED, info)
+    check("340011 仍是限流而不是查封",
+          errors.classify(FakeErr(340011, ""))["category"] ==
+          tieba_codes.CAT_RISK)
 
 
 def test_unknown_is_not_risk():
@@ -97,6 +106,9 @@ def test_keyword_fallback():
     case = FakeErr(999999, "您发布的内容含有敏感词")
     check("未收录码 + 敏感词 -> 内容违规",
           errors.classify(case)["category"] == tieba_codes.CAT_CONTENT)
+    case = FakeErr(999999, "该吧已被查封")
+    check("未收录码 + 查封 -> 吧已查封",
+          errors.classify(case)["category"] == tieba_codes.CAT_FORUM_BANNED)
     case = NoCodeErr("Need verify code")
     check("无码 + Need verify code -> 需要验证码",
           errors.classify(case)["category"] == tieba_codes.CAT_CAPTCHA)

@@ -66,14 +66,16 @@ def test_codes():
           "太快" in (tieba_codes.reason(340011) or ""))
     check("3280004 原因=操作太频繁",
           "频繁" in (tieba_codes.reason(3280004) or ""))
-    check("340001 分类=被限制",
-          tieba_codes.category_for_code(340001) == tieba_codes.CAT_RISK)
-    check("340001 原因=吧暂时被关闭",
+    check("340001 分类=吧已查封",
+          tieba_codes.category_for_code(340001) ==
+          tieba_codes.CAT_FORUM_BANNED)
+    check("340001 原因=吧被关闭",
           "关闭" in (tieba_codes.reason(340001) or ""))
-    check("340001 建议=换一个吧",
-          "换一个吧" in (tieba_codes.advice(340001) or ""))
-    check("340006 分类=风控限制",
-          tieba_codes.category_for_code(340006) == tieba_codes.CAT_RISK)
+    check("340001 建议=标记失效",
+          "失效贴吧" in (tieba_codes.advice(340001) or ""))
+    check("340006 分类=吧已查封",
+          tieba_codes.category_for_code(340006) ==
+          tieba_codes.CAT_FORUM_BANNED)
     check("110000 分类=账号失效",
           tieba_codes.category_for_code(110000) == tieba_codes.CAT_ACCOUNT)
     check("300004 分类=未关注",
@@ -767,6 +769,103 @@ def test_autosign_warning_not_failure():
     check("自动签到：通知带中文原因", "该吧不存在" in text, text)
 
 
+def test_invalid_module():
+    """0.6.2：失效贴吧模块的去重/过滤/删除。"""
+    import invalid
+
+    reset_files()
+    invalid.add_forum("  A吧  ")
+    invalid.add_forum("A吧")
+    check("失效吧会去重和去空白", invalid.list_forums() == ["A吧"],
+          invalid.list_forums())
+    check("失效吧命中", invalid.is_invalid("A吧") is True)
+    kept, skipped = invalid.filter_forums(["A吧", "B吧"])
+    check("过滤失效吧", kept == ["B吧"] and skipped == 1, (kept, skipped))
+    invalid.remove_forum("A吧")
+    check("删除后为空", invalid.list_forums() == [])
+
+
+def test_banned_and_invalid_forums():
+    """0.6.2：吧已查封跳过不急停；手动标记的失效吧直接过滤。"""
+    import invalid
+
+    reset_files()
+    forums = [FakeForum("closed"), FakeForum("ok1")]
+    state, _client = asyncio.run(run_sign(
+        forums, {"closed": FakeErr(340006, "")}))
+    check("340006 跳过且不计失败",
+          state["forum_banned"] == 1 and state["forum_failed"] == 0,
+          state)
+    check("340006 不触发熔断/硬停",
+          state.get("breaker") is None and state.get("hard_stopped") is None,
+          state)
+    check("340006 其余吧继续签到", state["forum_success"] == 1, state)
+    check("报告说明已查封跳过",
+          "已查封/关闭" in signer.report_text())
+
+    reset_files()
+    invalid.add_forum("badmark")
+    try:
+        forums = [FakeForum("badmark"), FakeForum("ok1")]
+        state2, client2 = asyncio.run(run_sign(forums))
+        check("手动标记的失效吧被过滤",
+              state2["forum_invalid"] == 1 and state2["forum_checked"] == 1,
+              state2)
+        check("失效吧不发补签请求",
+              all(not (c[0] == "sign_forum" and c[1] == "badmark")
+                  for c in client2.calls), client2.calls)
+    finally:
+        invalid.remove_forum("badmark")
+
+
+def test_pause_resume():
+    """0.6.2：一键签到支持暂停/继续，暂停期间不发新请求。"""
+    import time as _time
+
+    reset_files()
+    check("默认未暂停", signer.is_paused() is False)
+    signer.set_paused(True)
+    check("暂停标志生效", signer.is_paused() is True)
+    signer.set_paused(False)
+    check("继续后标志清除", signer.is_paused() is False)
+
+    forums = [FakeForum("p{}".format(i)) for i in range(4)]
+
+    class PauseClient(FakeClient):
+        def __init__(self, bduss):
+            super().__init__(bduss)
+            self.forums = forums
+
+    import types
+    mod = types.ModuleType("aiotieba")
+    mod.Client = PauseClient
+    mod.ReqUInfo = types.SimpleNamespace(BASIC=1, ALL=2)
+    sys.modules["aiotieba"] = mod
+    FakeClient.instances = []
+    account = {"id": 1, "name": "暂停账号", "mask": "mask"}
+    state = signer._new_state("pause-run", account)
+    signer._state = state
+    signer.set_paused(True)
+
+    async def scenario():
+        task = asyncio.create_task(signer._sign_async(state, FAKE_BDUSS))
+        await asyncio.sleep(0.2)
+        client = FakeClient.instances[-1] if FakeClient.instances else None
+        before = sum(1 for c in (client.calls if client else [])
+                     if c[0] == "sign_forum")
+        signer.set_paused(False)
+        await asyncio.wait_for(task, 3)
+        return before
+
+    try:
+        before = asyncio.run(scenario())
+        check("暂停期间没有补签请求", before == 0, before)
+        check("继续后全部完成", state["forum_success"] == 4, state)
+    finally:
+        signer.set_paused(False)
+        signer._state = None
+
+
 def test_tier_settings():
     """M3a：签到档位设置、clamp、红档未解锁与并发接线。"""
     import tiers
@@ -817,6 +916,12 @@ def test_tier_settings():
     check("保守档签到并发 <= 2", client.max_active <= 2, client.max_active)
     check("运行状态带档位", state.get("tier_level") == 0,
           state.get("tier_level"))
+
+    # 极速档（并发 8）必须真的用上 8 个并发
+    signer.save_settings({"level": 3})
+    forums = [FakeForum("c{}".format(i)) for i in range(8)]
+    _state3, client3 = asyncio.run(run_sign(forums))
+    check("极速档补签并发=8", client3.max_active == 8, client3.max_active)
     signer.save_settings({"level": 1})
 
 
@@ -828,6 +933,9 @@ def main():
     print("== msign 警告 =="); test_msign_warning()
     print("== msign 跳过继续（用户反馈） =="); test_msign_skip_and_continue()
     print("== 硬停与熔断（M3b） =="); test_hard_stop_and_breaker()
+    print("== 查封/失效吧（0.6.2） =="); test_banned_and_invalid_forums()
+    print("== 失效吧模块（0.6.2） =="); test_invalid_module()
+    print("== 暂停/继续（0.6.2） =="); test_pause_resume()
     print("== 账号入口 =="); test_account_gate_failure()
     print("== 网络分类 =="); test_network_error_category()
     print("== 关注列表并行预取（S4） =="); test_follow_pages_prefetch()

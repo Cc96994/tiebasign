@@ -35,7 +35,8 @@ import tieba_api  # noqa: E402
 _REAL_TIER_GET = tiers.get
 _TEST_TIER = tiers.Tier(level=1, name="标准", icon="", sign_concurrency=4,
                         like_concurrency=5, like_delay=(0, 0), color="blue")
-tiers.get = lambda level: _TEST_TIER
+_TEST_TIER_GET = lambda level: _TEST_TIER
+tiers.get = _TEST_TIER_GET
 
 TOTAL = [0]
 FAILS = []
@@ -93,6 +94,8 @@ class FakeClient:
     tid_map = {}
     agree_delay = 0.0
     thread_delay = 0.0
+    thread_errs = {}
+    instances = []
     agree_active = 0
     agree_peak = 0
     fetch_active = 0
@@ -102,6 +105,7 @@ class FakeClient:
         self.bduss = bduss
         self.agree_calls = []
         self.thread_calls = []
+        FakeClient.instances.append(self)
 
     async def __aenter__(self):
         return self
@@ -122,10 +126,12 @@ class FakeClient:
                 await asyncio.sleep(FakeClient.thread_delay)
             tid = FakeClient.tid_map.setdefault(fname,
                                                 2 + len(FakeClient.tid_map))
-            return FakeThreads([
+            threads = FakeThreads([
                 FakeThread(1, fname, "置顶", is_top=True),
                 FakeThread(tid, fname, "普通帖"),
             ])
+            threads.err = FakeClient.thread_errs.get(fname)
+            return threads
         finally:
             FakeClient.fetch_active -= 1
 
@@ -154,6 +160,8 @@ def reset_counters():
     FakeClient.agree_delay = 0.0
     FakeClient.thread_delay = 0.0
     FakeClient.agree_sequence = {}
+    FakeClient.thread_errs = {}
+    FakeClient.instances = []
 
 
 ACCOUNT = {"id": 1, "name": "示例账号", "mask": "abCD****wxyz"}
@@ -178,11 +186,12 @@ def wait_done(timeout=10):
 
 
 def run_like(forums, agree_errs=None, agree_sequence=None,
-             agree_delay=0.0, thread_delay=0.0):
+             agree_delay=0.0, thread_delay=0.0, thread_errs=None):
     reset_counters()
     FakeClient.forums = forums
     FakeClient.agree_errs = agree_errs or {}
     FakeClient.agree_sequence = agree_sequence or {}
+    FakeClient.thread_errs = thread_errs or {}
     FakeClient.agree_tids = []
     FakeClient.tid_map = {}
     FakeClient.agree_delay = agree_delay
@@ -252,15 +261,15 @@ def test_failure_isolated():
     reset()
     forums = [types.SimpleNamespace(fname="吧A"),
               types.SimpleNamespace(fname="吧B")]
-    state = run_like(forums, agree_errs={2: FakeErr(340006, "")})
+    state = run_like(forums, agree_errs={2: FakeErr(999999, "")})
     sub = state["accounts"][0]
     check("一个吧失败不影响另一个", sub["success"] == 1 and sub["failed"] == 1,
           sub)
     check("失败详情带中文原因",
-          sub["failures"] and "不能签到" in (sub["failures"][0]["reason"] or ""),
+          sub["failures"] and bool(sub["failures"][0]["detail"]),
           sub["failures"])
     # 失败的可以重试，成功的当天跳过
-    state2 = run_like(forums, agree_errs={2: FakeErr(340006, "")})
+    state2 = run_like(forums, agree_errs={2: FakeErr(999999, "")})
     sub2 = state2["accounts"][0]
     check("失败的吧可重试、成功的跳过",
           sub2["failed"] == 1 and sub2["skipped"] == 1, sub2)
@@ -300,7 +309,7 @@ def test_batched_writes():
     reset()
     forums2 = [types.SimpleNamespace(fname="吧{:02d}".format(i))
                for i in range(3)]
-    errs = {i: FakeErr(340006, "") for i in range(2, 5)}
+    errs = {i: FakeErr(999999, "") for i in range(2, 5)}
     run_like(forums2, agree_errs=errs)
     saves[:] = []
     loads[:] = []
@@ -403,7 +412,47 @@ def test_tier_settings():
               st["stored_level"] == 5 and st["level"] == 5, st)
         liker.save_settings({"level": 1})
     finally:
-        tiers.get = _TEST_TIER
+        tiers.get = _TEST_TIER_GET
+
+
+def test_banned_and_invalid_forums():
+    """0.6.2：吧已查封跳过；手动标记的失效吧直接过滤。"""
+    import invalid
+
+    reset()
+    invalid.add_forum("badmark")
+    try:
+        forums = [types.SimpleNamespace(fname="badmark"),
+                  types.SimpleNamespace(fname="吧A")]
+        state = run_like(forums)
+        sub = state["accounts"][0]
+        check("点赞跳过手动标记的失效吧",
+              sub["invalid_skipped"] == 1 and sub["total"] == 1, sub)
+        check("失效吧没有取帖请求",
+              all("badmark" not in c.thread_calls
+                  for c in FakeClient.instances),
+              [c.thread_calls for c in FakeClient.instances])
+    finally:
+        invalid.remove_forum("badmark")
+
+    reset()
+    forums = [types.SimpleNamespace(fname="吧A"),
+              types.SimpleNamespace(fname="吧B")]
+    state2 = run_like(forums, thread_errs={"吧B": FakeErr(340006, "")})
+    sub2 = state2["accounts"][0]
+    check("吧已查封跳过不计失败",
+          sub2["failed"] == 0 and sub2["skipped"] >= 1, sub2)
+    check("另一个吧正常点赞", sub2["success"] == 1, sub2)
+
+
+def test_pause_flag():
+    """0.6.2：点赞暂停标志可切换。"""
+    reset()
+    check("点赞默认未暂停", liker.is_paused() is False)
+    liker.set_paused(True)
+    check("点赞暂停标志生效", liker.is_paused() is True)
+    liker.set_paused(False)
+    check("点赞继续后标志清除", liker.is_paused() is False)
 
 
 def main():
@@ -414,6 +463,8 @@ def main():
     print("== 取帖/点赞并发 =="); test_fetch_and_like_concurrency()
     print("== 限流退避 =="); test_rate_limit_cooldown()
     print("== 档位设置 =="); test_tier_settings()
+    print("== 查封/失效吧（0.6.2） =="); test_banned_and_invalid_forums()
+    print("== 暂停标志（0.6.2） =="); test_pause_flag()
     print()
     print("{} checks, {} failed".format(TOTAL[0], len(FAILS)))
     if FAILS:

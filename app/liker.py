@@ -31,6 +31,7 @@ import threading
 import time
 
 import errors
+import invalid
 import redact
 import tieba_api
 import tieba_codes
@@ -60,6 +61,8 @@ PHASE_LIKE = "like"
 _lock = threading.RLock()
 _state = None
 _run_counter = 0
+#: 手动暂停（0.6.2 用户反馈）：set 时不再发新的取帖/点赞请求。
+_pause = threading.Event()
 
 
 def _data_path():
@@ -270,6 +273,8 @@ def _new_state(run_id, pairs):
             "phase_ms": {},
             "tier_level": None,
             "tier_name": None,
+            "paused": False,
+            "invalid_skipped": 0,
             "failures": [],
             "error": None,
         })
@@ -283,6 +288,7 @@ def _new_state(run_id, pairs):
         "accounts": accounts,
         "started_at": int(time.time() * 1000),
         "finished_at": None,
+        "paused": False,
         "error": None,
     }
 
@@ -317,6 +323,28 @@ def _update_account(account_id, **kwargs):
                 return
 
 
+def is_paused():
+    return _pause.is_set()
+
+
+def set_paused(paused):
+    """手动暂停/继续：只停新的取帖/点赞请求，进行中的会自然完成。"""
+    if paused:
+        _pause.set()
+    else:
+        _pause.clear()
+    paused = bool(paused)
+    with _lock:
+        if _state is not None and _state.get("status") in ("starting",
+                                                           "running"):
+            _state["paused"] = paused
+            for sub in _state.get("accounts") or []:
+                if sub.get("status") in ("pending", "running"):
+                    sub["paused"] = paused
+                    sub["step"] = "已暂停" if paused else "逐个吧点赞"
+    return paused
+
+
 def start(pairs):
     """pairs: [(account_dict, bduss_str), ...]；bduss 只活在本次调用/协程里。"""
     global _state, _run_counter
@@ -327,6 +355,7 @@ def start(pairs):
             return None, "未选择要点赞的账号"
         _run_counter += 1
         run_id = "like{:d}".format(_run_counter)
+        _pause.clear()
         _state = _new_state(run_id, pairs)
 
     def _worker():
@@ -523,6 +552,9 @@ async def _like_account_async(account, bduss):
                 _phase_add(sub, PHASE_LIST, list_started)
             if forums is None:
                 return
+            forums, invalid_skipped = invalid.filter_forums(forums)
+            if invalid_skipped:
+                sub["invalid_skipped"] = invalid_skipped
             _update_account(aid, total=len(forums), status="running",
                             step="逐个吧点赞")
             if not forums:
@@ -537,11 +569,19 @@ async def _like_account_async(account, bduss):
             flags = {"stop": False}
             rng = random.SystemRandom()
 
+            async def _wait_if_paused():
+                while _pause.is_set() and not flags["stop"]:
+                    await asyncio.sleep(0.2)
+
             async def one(forum):
                 fname = str(getattr(forum, "fname", "") or "")
                 if not fname:
                     _bump(aid, "checked")
                     return
+                if flags["stop"]:
+                    _bump(aid, "skipped")
+                    return
+                await _wait_if_paused()
                 if flags["stop"]:
                     _bump(aid, "skipped")
                     return
@@ -557,6 +597,11 @@ async def _like_account_async(account, bduss):
                                                            rn=_RN)
                 except Exception as exc:  # noqa: BLE001
                     info = _describe(exc)
+                    if info["category"] == tieba_codes.CAT_FORUM_BANNED:
+                        # 0.6.2：吧已查封/关闭，跳过、不算失败、不硬停。
+                        _bump(aid, "skipped")
+                        _bump(aid, "checked")
+                        return
                     _add_failure(sub, fname, info)
                     _bump(aid, "failed")
                     _bump(aid, "checked")
@@ -566,6 +611,10 @@ async def _like_account_async(account, bduss):
                 terr = getattr(threads, "err", None)
                 if terr is not None:
                     info = _describe(terr)
+                    if info["category"] == tieba_codes.CAT_FORUM_BANNED:
+                        _bump(aid, "skipped")
+                        _bump(aid, "checked")
+                        return
                     _add_failure(sub, fname, info)
                     if info["category"] in (tieba_codes.CAT_ACCOUNT,
                                             tieba_codes.CAT_CAPTCHA):
@@ -585,6 +634,11 @@ async def _like_account_async(account, bduss):
                 thread = rng.choice(pool)
                 tid = int(thread.tid)
                 title = str(getattr(thread, "title", "") or "")
+                await _wait_if_paused()
+                if flags["stop"]:
+                    _bump(aid, "skipped")
+                    _bump(aid, "checked")
+                    return
                 # 点赞接口对频率很敏感：首次请求前停一小段，限流退避见
                 # _agree_with_retry（冷却窗在信号量外面）。
                 resp, err = await _agree_with_retry(
@@ -592,6 +646,10 @@ async def _like_account_async(account, bduss):
                     rng.uniform(*like_delay))
                 if err is not None:
                     info = _describe(err)
+                    if info["category"] == tieba_codes.CAT_FORUM_BANNED:
+                        _bump(aid, "skipped")
+                        _bump(aid, "checked")
+                        return
                     _add_failure(sub, fname, info)
                     _record(aid, fname, False, tid, title,
                             info["code"], info["reason"],
