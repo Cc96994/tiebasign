@@ -407,36 +407,26 @@ def test_msign_warning():
     check("msign 详情非空", bool(state["msign"]["detail"]))
 
 
-def test_msign_risk_stop():
-    """S6：msign 撞风控/验证码时停止逐吧兜底（唯一会少签的改动）。"""
-    reset_files()
-    forums = [FakeForum("吧A"), FakeForum("吧B"), FakeForum("吧C")]
-    state, client = asyncio.run(run_sign(
-        forums, msign_err=FakeErr(340011, "")))
-    check("风控类 msign 失败 -> 整体 error", state["status"] == "error",
-          state["status"])
-    check("风控类 msign 失败 -> 标记跳过兜底",
-          state.get("fallback_skipped") is True, state)
-    check("风控类 msign 失败 -> 没有逐吧请求",
-          not any(c[0] == "sign_forum" for c in client.calls), client.calls)
-    check("风控类 msign 失败 -> 错误分类=被限制",
-          state["error"]["category"] == tieba_codes.CAT_RISK, state["error"])
-    check("风控类 msign 失败 -> 错误文案说明已停止",
-          "停止逐吧补签" in (state["error"]["detail"] or ""), state["error"])
-    report = signer.report_text()
-    check("风控即停：报告说明没有继续补签",
-          "已停止逐吧补签" in report, report)
-
-    # 验证码类同样停止
-    state2, client2 = asyncio.run(run_sign(
-        forums, msign_err=FakeErr(4, "")))
-    check("验证码类 msign 失败 -> 停止兜底并报错",
-          state2["status"] == "error" and
-          state2["error"]["category"] == tieba_codes.CAT_CAPTCHA,
-          state2.get("error"))
-    check("验证码类 msign 失败 -> 没有逐吧请求",
-          not any(c[0] == "sign_forum" for c in client2.calls),
-          client2.calls)
+def test_msign_skip_and_continue():
+    """用户 0.6.1 反馈：msign 失败只跳过，继续逐吧补签，不弹报告。"""
+    for code in (340011, 4, 999999):
+        reset_files()
+        forums = [FakeForum("吧A"), FakeForum("吧B")]
+        state, client = asyncio.run(run_sign(
+            forums, msign_err=FakeErr(code, "")))
+        check("msign 失败不中断（code={}）".format(code),
+              state["status"] == "done", state["status"])
+        check("msign 失败继续逐吧补签（code={}）".format(code),
+              sum(1 for c in client.calls if c[0] == "sign_forum") == 2,
+              client.calls)
+        check("msign 失败不进 error（code={}）".format(code),
+              state.get("error") is None, state.get("error"))
+        check("msign 失败只进一条 warning（code={}）".format(code),
+              len(state["warnings"]) == 1, state.get("warnings"))
+        check("msign warning 带真实 code（code={}）".format(code),
+              state["warnings"][0]["code"] == code, state["warnings"])
+        check("msign 警告不算失败（code={}）".format(code),
+              state["forum_failed"] == 0, state["forum_failed"])
 
 
 def test_account_gate_failure():
@@ -628,6 +618,59 @@ def test_growth_step():
     check("成长签到成功 -> success", state3["growth"]["status"] == "success")
 
 
+def test_autosign_retry():
+    """用户反馈：失败后按 retry_minutes 自动重试（默认 5 分钟，最多 3 次）。"""
+    import autosign
+    import time as _time
+
+    reset_files()
+    check("自动重试默认 5 分钟",
+          autosign.get_settings()["retry_minutes"] == 5)
+    check("重试间隔夹到 1",
+          autosign.save_settings({"retry_minutes": 0})["retry_minutes"] == 1)
+    check("重试间隔夹到 120",
+          autosign.save_settings({"retry_minutes": 999})["retry_minutes"] == 120)
+    autosign.save_settings({"retry_minutes": 5})
+
+    data = autosign._load()
+    data["retries"] = {}
+    autosign._save(data)
+    count = autosign._schedule_retry(data, 1, "2026-11-18")
+    check("排第一次重试",
+          count == 1 and data["retries"]["1"]["count"] == 1,
+          data.get("retries"))
+    check("未到点不重试",
+          autosign._retry_due(data, 1, "2026-11-18", now_ts=0) is False)
+    check("到点重试",
+          autosign._retry_due(
+              data, 1, "2026-11-18",
+              now_ts=data["retries"]["1"]["next_ts"] + 1) is True)
+    check("隔天不重试",
+          autosign._retry_due(data, 1, "2026-11-19",
+                              now_ts=_time.time() + 1) is False)
+    autosign._clear_retry(data, 1)
+    check("成功后清掉重试", not data.get("retries"))
+
+    # 通知只在最后一次尝试：重试期间不弹通知/不亮红点
+    notified = []
+    old_notify = autosign.notify_fail
+    autosign.notify_fail = lambda *a: notified.append(a)
+    try:
+        account = {"id": 1, "name": "测试账号", "mask": "AbCd****TEST"}
+        state = {"status": "done", "forum_failed": 1, "forum_success": 0,
+                 "msign": {"status": "success"}, "warnings": [],
+                 "failures": [{"forum": "坏吧", "detail": "失败"}],
+                 "account_id": 1}
+        snap = autosign._finalize(account, state, notify=False)
+        check("重试期间不弹通知", notified == [], notified)
+        check("重试期间不亮红点", snap["dot_pending"] is False)
+        snap2 = autosign._finalize(account, state, notify=True)
+        check("最后失败才弹通知", len(notified) == 1, notified)
+        check("最后失败才亮红点", snap2["dot_pending"] is True)
+    finally:
+        autosign.notify_fail = old_notify
+
+
 def test_auto_modules():
     """自动吧群签到/随机点赞由 autosign 调度，各模块有开关/时间。"""
     import autosign
@@ -783,7 +826,7 @@ def main():
     print("== 脱敏 =="); test_redact()
     print("== 签到主流程 =="); test_signer_flow()
     print("== msign 警告 =="); test_msign_warning()
-    print("== msign 风控即停（S6） =="); test_msign_risk_stop()
+    print("== msign 跳过继续（用户反馈） =="); test_msign_skip_and_continue()
     print("== 硬停与熔断（M3b） =="); test_hard_stop_and_breaker()
     print("== 账号入口 =="); test_account_gate_failure()
     print("== 网络分类 =="); test_network_error_category()
@@ -792,6 +835,7 @@ def main():
     print("== 成长等级签到 =="); test_growth_step()
     print("== 档位设置（M3a） =="); test_tier_settings()
     print("== 自动签到 warnings =="); test_autosign_warning_not_failure()
+    print("== 自动重试（用户反馈） =="); test_autosign_retry()
     print("== 自动模块 =="); test_auto_modules()
     print()
     print("{} checks, {} failed".format(TOTAL[0], len(FAILS)))

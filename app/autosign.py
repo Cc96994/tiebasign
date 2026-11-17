@@ -37,11 +37,19 @@ _DEFAULTS = {
     "auto_like": True,
     "groupsign_time": "",
     "like_time": "",
+    # 用户 0.6.1 反馈：失败后按这个间隔自动重试（分钟），默认 5。
+    "retry_minutes": 5,
     "accounts": {},   # {str(account_id): {"follow_global": bool, "custom_time": "HH:MM"}}
     "runs": {},       # {str(account_id): {"date": "YYYY-MM-DD", "ts": iso}}
     "results": {},    # {str(account_id): latest snapshot}
     "module_runs": {},  # {"groupsign"/"like": {"date","ts","attempts","attempt_date"}}
+    "retries": {},    # {str(account_id): {"date","count","next_ts"}}
 }
+
+#: 初次失败后最多再试 3 次（共 4 次）；间隔由 retry_minutes 决定。
+_RETRY_MAX = 3
+_RETRY_MIN_MINUTES = 1
+_RETRY_MAX_MINUTES = 120
 
 _lock = threading.RLock()
 _cache = None
@@ -82,6 +90,9 @@ def _load():
             data["module_runs"] = {str(k): v for k, v in
                                    data["module_runs"].items()
                                    if isinstance(v, dict)}
+            data["retries"] = {str(k): v for k, v in
+                               data.get("retries", {}).items()
+                               if isinstance(v, dict)}
         except FileNotFoundError:
             pass
         except Exception as exc:  # noqa: BLE001 - corrupt settings: start fresh
@@ -123,6 +134,56 @@ def _validate_time(value):
     return value if _TIME_RE.match(value) else None
 
 
+def _clamp_retry_minutes(value):
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        minutes = 5
+    return max(_RETRY_MIN_MINUTES, min(_RETRY_MAX_MINUTES, minutes))
+
+
+def _retry_minutes(data):
+    return _clamp_retry_minutes(data.get("retry_minutes", 5))
+
+
+def _retry_delay_sec(data):
+    return _retry_minutes(data) * 60
+
+
+def _schedule_retry(data, account_id, today):
+    """登记一次待重试，返回这是第几次（1.._RETRY_MAX）。"""
+    key = str(account_id)
+    entries = data.get("retries")
+    if not isinstance(entries, dict):
+        entries = {}
+        data["retries"] = entries
+    info = entries.get(key) or {}
+    if info.get("date") != today:
+        info = {"date": today, "count": 0, "next_ts": 0}
+    info["count"] = int(info.get("count") or 0) + 1
+    info["next_ts"] = time.time() + _retry_delay_sec(data)
+    entries[key] = info
+    return info["count"]
+
+
+def _clear_retry(data, account_id):
+    entries = data.get("retries")
+    if isinstance(entries, dict):
+        entries.pop(str(account_id), None)
+
+
+def _retry_due(data, account_id, today, now_ts=None):
+    """今天还有未用完的重试次数，且已到点。"""
+    now_ts = time.time() if now_ts is None else now_ts
+    info = (data.get("retries") or {}).get(str(account_id)) or {}
+    if info.get("date") != today:
+        return False
+    count = int(info.get("count") or 0)
+    if count <= 0 or count > _RETRY_MAX:
+        return False
+    return int(info.get("next_ts") or 0) <= now_ts
+
+
 def get_settings():
     """Public settings plus per-account effective values (no secrets)."""
     import storage
@@ -151,6 +212,7 @@ def get_settings():
         "auto_like": bool(data.get("auto_like", True)),
         "groupsign_time": _validate_time(data.get("groupsign_time")) or "",
         "like_time": _validate_time(data.get("like_time")) or "",
+        "retry_minutes": _retry_minutes(data),
         "accounts": accounts,
     }
 
@@ -173,6 +235,8 @@ def save_settings(payload):
     for key in ("groupsign_time", "like_time"):
         if key in payload and payload[key] is not None:
             data[key] = _validate_time(payload.get(key)) or ""
+    if "retry_minutes" in payload and payload["retry_minutes"] is not None:
+        data["retry_minutes"] = _clamp_retry_minutes(payload["retry_minutes"])
     accounts_payload = payload.get("accounts")
     if isinstance(accounts_payload, dict):
         for aid, cfg in accounts_payload.items():
@@ -405,7 +469,7 @@ def _wait_signer_done(timeout=900):
     return signer.get_state()
 
 
-def _finalize(account, state):
+def _finalize(account, state, notify=True):
     data = _load()
     msign = state.get("msign") or {}
     failures = list(state.get("failures") or [])
@@ -450,7 +514,7 @@ def _finalize(account, state):
         "failed": int(failed),
         "failures": failures[:50],
         "warnings": warnings[:50],
-        "dot_pending": bool(not ok and data["notify_dot"]),
+        "dot_pending": bool(notify and not ok and data["notify_dot"]),
     }
     data["results"][str(account["id"])] = snapshot
     _save(data)
@@ -458,7 +522,7 @@ def _finalize(account, state):
     if not ok:
         _log("auto run account_id={} FAILED ok=0 failed={}".format(
             account["id"], failed))
-        if data["notify_system"]:
+        if notify and data["notify_system"]:
             text = _notify_text(account, snapshot)
             try:
                 notify_fail("贴吧签到助手 自动签到失败", text)
@@ -490,28 +554,48 @@ def _notify_text(account, snapshot):
     return " ".join(parts)[:300]
 
 
-def _run_due(accounts, today):
+def _run_due(accounts, today, retry_ids=None):
     global _run_now_flag
     import storage
 
+    retry_ids = set(retry_ids or [])
     for account in accounts:
+        aid = account["id"]
         run_id, err = _wait_for_signer_start(account)
         if err:
-            _log("account_id={} start failed: {}".format(account["id"], err))
+            _log("account_id={} start failed: {}".format(aid, err))
             continue
-        _log("account_id={} run_id={} started".format(account["id"], run_id))
+        _log("account_id={} run_id={} started{}".format(
+            aid, run_id, " (retry)" if aid in retry_ids else ""))
         state = _wait_signer_done()
+        data = _load()
+        info = (data.get("retries") or {}).get(str(aid)) or {}
+        done_retries = (int(info.get("count") or 0)
+                        if info.get("date") == today else 0)
+        # 这次是最后一次允许的尝试：失败才弹通知/红点。
+        final = done_retries >= _RETRY_MAX
+        snapshot = None
         try:
-            _finalize(account, state or {})
+            snapshot = _finalize(account, state or {}, notify=final)
         except Exception as exc:  # noqa: BLE001
             _log("finalize error: {} {}".format(type(exc).__name__, exc))
+        data = _load()
+        if snapshot and snapshot.get("ok"):
+            _clear_retry(data, aid)
+        elif final:
+            _clear_retry(data, aid)
+            _log("account_id={} final failure after {} retries".format(
+                aid, done_retries))
+        else:
+            count = _schedule_retry(data, aid, today)
+            _log("account_id={} failed, retry {}/{} in {} min".format(
+                aid, count, _RETRY_MAX, _retry_minutes(data)))
         if not _run_now_flag:
-            data = _load()
-            data["runs"][str(account["id"])] = {
+            data["runs"][str(aid)] = {
                 "date": today,
                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
-            _save(data)
+        _save(data)
     with _lock:
         _run_now_flag = False
 
@@ -630,21 +714,27 @@ def _scheduler_loop():
                 import storage
 
                 due = []
+                retry_ids = []
                 run_now = False
                 with _lock:
                     run_now = _run_now_flag
+                now_ts = time.time()
                 for acc in storage.list_accounts():
                     if run_now:
                         due.append(acc)
+                        continue
+                    if _retry_due(data, acc["id"], today, now_ts):
+                        due.append(acc)
+                        retry_ids.append(acc["id"])
                         continue
                     ran = data["runs"].get(str(acc["id"]), {}).get("date")
                     if ran != today and hhmm >= _effective_time(
                             acc["id"], data):
                         due.append(acc)
                 if due:
-                    _log("due accounts: {} (run_now={})".format(
-                        [a["id"] for a in due], run_now))
-                    _run_due(due, today)
+                    _log("due accounts: {} (run_now={}, retries={})".format(
+                        [a["id"] for a in due], run_now, retry_ids))
+                    _run_due(due, today, retry_ids=retry_ids)
 
             # 两个独立模块有自己的每日开关/时间；即使自动签到总开关关着，
             # 只要模块开关是开的也执行。

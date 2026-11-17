@@ -635,7 +635,7 @@ def _page_settings():
         "<span>随机点赞设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.6.0 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.6.1 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -1120,7 +1120,13 @@ def _page_settings_auto():
         "<div class='card'><div class='title'>全局时间</div>"
         "<div class='form'><label>每天签到时间（默认 08:00）</label>"
         "<input class='input' type='time' id='global_time' value='{}'>"
-        "</div></div>"
+        "</div>"
+        "<div class='form'><label>失败后自动重试（分钟，1-120）</label>"
+        "<input class='input' type='number' id='retry_minutes' min='1' "
+        "max='120' value='{}'></div>"
+        "<div class='hint'>自动签到失败后每隔这么久重试一次，最多 3 次；"
+        "重试期间不弹通知、不亮红点，成功或次数用完才提醒。</div>"
+        "</div>"
         "<div class='card'><div class='title'>仅失败通知（双开关）</div>"
         "<label class='menu-item'><span>签到失败系统通知</span>"
         "<input type='checkbox' id='notify_system'{}></label>"
@@ -1146,6 +1152,7 @@ def _page_settings_auto():
     ).format(
         " checked" if st["enabled"] else "",
         html.escape(st["global_time"]),
+        st.get("retry_minutes") or 5,
         " checked" if st["notify_system"] else "",
         " checked" if st["notify_dot"] else "",
         "".join(acc_rows), "".join(result_rows))
@@ -1170,6 +1177,7 @@ return out;}
 document.getElementById('save_btn').addEventListener('click',function(){
 var payload={enabled:document.getElementById('enabled').checked,
 global_time:document.getElementById('global_time').value,
+retry_minutes:document.getElementById('retry_minutes').value,
 notify_system:document.getElementById('notify_system').checked,
 notify_dot:document.getElementById('notify_dot').checked,
 accounts:collectAccounts()};
@@ -2056,6 +2064,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "global_time": gt or None,
                 "notify_system": data.get("notify_system"),
                 "notify_dot": data.get("notify_dot"),
+                "retry_minutes": data.get("retry_minutes"),
                 "auto_groupsign": data.get("auto_groupsign"),
                 "groupsign_time": data.get("groupsign_time"),
                 "auto_like": data.get("auto_like"),
@@ -2550,9 +2559,7 @@ function renderSingle(s){
   if(s.msign){
     var m=s.msign;
     var color=(m.status==='success')?'#0BA36B':(CAT_COLOR[m.category]||'#E5484D');
-    var msignText=m.status==='success'?'成功':
-      (s.fallback_skipped?'没成功（命中风控类错误），已停止逐吧补签':
-       '没成功，已改为逐个吧补签');
+    var msignText=m.status==='success'?'成功':'没成功，已改为逐个吧补签';
     html+='<div class="hint" style="color:'+color+';font-weight:700;margin-top:8px">'+
       '网页一键签到：'+msignText+'</div>';
   }
@@ -2641,9 +2648,7 @@ function renderMulti(s){
       if(a.msign){
         var m=a.msign;
         var mc=(m.status==='success')?'#0BA36B':(CAT_COLOR[m.category]||'#E5484D');
-        var msignText=m.status==='success'?'成功':
-          (a.fallback_skipped?'没成功（命中风控类错误），已停止逐吧补签':
-           '没成功，已改为逐个吧补签');
+        var msignText=m.status==='success'?'成功':'没成功，已改为逐个吧补签';
         html+='<div class="hint" style="color:'+mc+';font-weight:700;margin-top:6px">'+
           '网页一键签到：'+msignText+'</div>';
       }

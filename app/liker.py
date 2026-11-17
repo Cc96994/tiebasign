@@ -245,7 +245,7 @@ def save_settings(payload):
         raise ValueError("设置格式不对")
     level = tiers.clamp(payload.get("level", tiers.DEFAULT_LEVEL))
     if not tiers.can_open(level):
-        raise ValueError("危险档位尚未解锁（0.6.0 只开放到「极速」）")
+        raise ValueError("危险档位尚未解锁")
     data = _load()
     data["level"] = level
     _save(data)

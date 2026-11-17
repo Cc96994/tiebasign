@@ -135,6 +135,8 @@ def page_content_checks():
     check("自动签到页引导到模块自己的设置页",
           "/settings/groupsign" in auto_html and
           "/settings/like" in auto_html)
+    check("自动签到页有失败重试分钟输入",
+          "id='retry_minutes'" in auto_html and "自动重试" in auto_html)
 
     set_state(phase="available", dot=True,
               latest={"version": "0.5.7", "version_code": 1023507})
@@ -167,8 +169,8 @@ def page_content_checks():
     check("签到页 JS 展示成长等级签到", "成长等级签到" in main._JS_SIGN)
     check("签到页 JS 展示错误码", "错误码" in main._JS_SIGN)
     check("签到页 JS 展示已签到数（不计失败）", "已签到" in main._JS_SIGN)
-    check("签到页 JS 区分「风控即停」文案",
-          "已停止逐吧补签" in main._JS_SIGN)
+    check("签到页 JS 区分 msign 跳过文案",
+          "没成功，已改为逐个吧补签" in main._JS_SIGN)
     check("签到页 JS 用「原因」和「怎么办」说人话",
           "原因：" in main._JS_SIGN and "怎么办：" in main._JS_SIGN)
     check("签到页 JS 有提醒区（warnings）", "warningsCard" in main._JS_SIGN)
@@ -375,6 +377,7 @@ def http_checks():
         status, body = post("/api/auto/settings", {
             "enabled": True, "global_time": "08:00",
             "notify_system": True, "notify_dot": True,
+            "retry_minutes": 7,
             "auto_groupsign": False, "groupsign_time": "09:30",
             "auto_like": True, "like_time": "", "accounts": {},
         })
@@ -383,6 +386,8 @@ def http_checks():
               and body["settings"]["auto_groupsign"] is False
               and body["settings"]["groupsign_time"] == "09:30"
               and body["settings"]["auto_like"] is True, body)
+        check("失败重试分钟可保存",
+              body["settings"]["retry_minutes"] == 7, body)
         status, body = post("/api/update/settings", {"auto_check": False})
         check("POST 设置成功", status == 200 and body["ok"] is True)
         check("设置真的生效了", updater.get_settings()["auto_check"] is False)

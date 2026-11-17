@@ -35,7 +35,8 @@ v0.6.0 M1（优化清单第 3 节）:
     * S3：进度每个吧都刷新，不再 10 个一次；
     * S4：关注列表第一页之后小批量并行预取（``LIST_PREFETCH_PAGES``）；
     * S5：随机抖动挪到信号量外面，不占并发槽；
-    * S6：msign 命中风控/验证码时停止逐吧兜底，未知错误仍继续兜底；
+    * S6（按用户反馈调整）：msign 失败只跳过、继续逐吧补签，不中断整批，
+      也不弹失败提醒；warning 里保留真实 code / reason 供排查；
     * S8：多账号一键签到并行，最多 2 个账号同时跑（``ACCOUNT_CONCURRENCY``）。
       S7 / S10 的并发与速率由 M3 档位统一接管，S9 跨运行复用 Client 暂不做。
 
@@ -170,7 +171,7 @@ def save_settings(payload):
         raise ValueError("设置格式不对")
     level = tiers.clamp(payload.get("level", tiers.DEFAULT_LEVEL))
     if not tiers.can_open(level):
-        raise ValueError("危险档位尚未解锁（0.6.0 只开放到「极速」）")
+        raise ValueError("危险档位尚未解锁")
     _save_settings(level)
     _log("settings saved level={}".format(level))
     return get_settings()
@@ -205,7 +206,6 @@ def _new_state(run_id, account):
         "started_at": _now_ms(),
         "finished_at": None,
         "msign": None,          # {"status","category","code","reason","detail"}
-        "fallback_skipped": False,  # S6：msign 撞风控后是否跳过了逐吧补签
         "growth": None,         # 成长等级签到（4.7.1 的 sign_growth）结果
         "forum_total": 0,       # forums that still needed signing
         "forum_checked": 0,
@@ -674,32 +674,12 @@ async def _sign_async(state, bduss):
                                          "advice": item["advice"],
                                          "detail": item["detail"],
                                          "raw": item["raw"]})
-                # msign 失败本身不算整体失败：后面逐吧补签才是权威结果。
+                # msign 只是快捷方式：失败就跳过，继续逐吧补签；不判整体失败、
+                # 不弹通知，只在提醒里留一条（带真实 code/reason）。
+                state["warnings"].append(item)
                 _log("msign failed code={} category={} detail={} raw={}".format(
                     item["code"], item["category"], item["detail"],
                     item["raw"]), secret)
-                if item["category"] in (tieba_codes.CAT_RISK,
-                                        tieba_codes.CAT_CAPTCHA):
-                    # S6：这是清单里唯一会让「签到数变少」的改动。只有确认
-                    # 是风控/验证码才停；未知错误继续逐吧兜底（可能是接口变了）。
-                    # 停止时不再把它塞进 warnings：整体已经 error，页面有错误框，
-                    # 再挂一条「不影响签到结果」的提醒会自相矛盾。
-                    _update_in(
-                        state, status="error",
-                        step="网页一键签到被限制，已停止逐吧补签",
-                        finished_at=_now_ms(),
-                        fallback_skipped=True,
-                        error={"category": item["category"],
-                               "code": item["code"],
-                               "reason": item["reason"],
-                               "advice": item["advice"],
-                               "detail": "网页一键签到被限制，已停止逐吧补签，"
-                                         "避免继续触发风控",
-                               "raw": item["raw"]})
-                    _log("run={} msign blocked ({}) -> skip forum fallback"
-                         .format(state.get("run_id"), item["category"]), secret)
-                    return
-                state["warnings"].append(item)
 
             # ---- 3. enumerate followed forums ----------------------------
             _update_in(state, step="获取关注吧列表")
@@ -804,7 +784,6 @@ def _snapshot_for_report(state):
                 "status": sub.get("status"),
                 "step": sub.get("step"),
                 "msign": sub.get("msign"),
-                "fallback_skipped": sub.get("fallback_skipped"),
                 "growth": sub.get("growth"),
                 "forum_total": sub.get("forum_total"),
                 "forum_checked": sub.get("forum_checked"),
@@ -830,7 +809,6 @@ def _snapshot_for_report(state):
             "account_name": state.get("account_name"),
             "account_mask": state.get("account_mask"),
             "msign": state.get("msign"),
-            "fallback_skipped": state.get("fallback_skipped"),
             "growth": state.get("growth"),
             "forum_total": state.get("forum_total"),
             "forum_checked": state.get("forum_checked"),
@@ -868,13 +846,11 @@ def load_last_report():
         return None
 
 
-def _fmt_msign(msign, fallback_skipped=False):
+def _fmt_msign(msign):
     if not msign:
         return None
     if msign.get("status") == "success":
         return "网页一键签到：成功"
-    if fallback_skipped:
-        return "网页一键签到：没成功（命中风控类错误），已停止逐吧补签"
     return "网页一键签到：没成功，已改为逐个吧补签"
 
 
@@ -964,12 +940,10 @@ def _report_lines_for_account(label, acct):
     growth = _fmt_growth(acct.get("growth"))
     if growth:
         lines.append("  " + growth)
-    msign = _fmt_msign(acct.get("msign"), acct.get("fallback_skipped"))
+    msign = _fmt_msign(acct.get("msign"))
     if msign:
         lines.append("  " + msign)
-    if acct.get("fallback_skipped"):
-        lines.append("  补签：未执行（网页一键签到命中风控，已停止逐吧补签）")
-    elif acct.get("forum_total") is not None:
+    if acct.get("forum_total") is not None:
         line = "  补签：检查 {} / 成功 {} / 失败 {}".format(
             acct.get("forum_checked") or 0,
             acct.get("forum_success") or 0,
