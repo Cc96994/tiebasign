@@ -1013,7 +1013,7 @@ def _notify_failure(target, content, result):
             "贴吧签到助手 自动水贴失败",
             "《{}》回复失败：{} - {}".format(
                 target.get("title") or target.get("fname") or "主题帖",
-                result.get("category") or "风控其他",
+                result.get("category") or "原因不明",
                 (result.get("detail") or "")[:160]))
     except Exception as exc:  # noqa: BLE001
         _log("notify failed: {}: {}".format(type(exc).__name__, exc))
