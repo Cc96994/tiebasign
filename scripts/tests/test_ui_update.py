@@ -201,7 +201,8 @@ def page_content_checks():
           "/settings/invalid" in main._page_settings())
     check("签到页有暂停按钮",
           "sign_pause_btn" in main._JS_SIGN
-          and "like_pause_btn" in main._JS_SIGN)
+          and "like_pause_btn" in main._JS_SIGN
+          and "已暂停：不再发新的补签请求" in main._JS_SIGN)
     invalid_page = main._page_settings_invalid()
     check("失效贴吧页可渲染且含添加控件",
           "id='bad_forum_name'" in invalid_page
@@ -393,12 +394,16 @@ def http_checks():
         check("签到暂停接口",
               status == 200 and body["ok"] is True
               and body["paused"] is True, body)
+        check("签到暂停标志真的生效", main.signer.is_paused() is True)
         post("/api/sign/pause", {"paused": False})
+        check("签到继续后标志清除", main.signer.is_paused() is False)
         status, body = post("/api/like/pause", {"paused": True})
         check("点赞暂停接口",
               status == 200 and body["ok"] is True
               and body["paused"] is True, body)
+        check("点赞暂停标志真的生效", main.liker.is_paused() is True)
         post("/api/like/pause", {"paused": False})
+        check("点赞继续后标志清除", main.liker.is_paused() is False)
         status, body = get("/api/update/state")
         state = json.loads(body)["state"]
         check("GET /api/update/state 200",

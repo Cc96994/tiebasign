@@ -641,7 +641,7 @@ def _page_settings():
         "<span>随机点赞设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.6.2 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.6.3 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -2683,6 +2683,10 @@ function renderSingle(s){
     html+='<div class="hint" style="color:#8A90A0;margin-top:4px">已跳过 '+
       s.forum_invalid+' 个吧（手动标记的失效吧）</div>';
   }
+  if(s.paused){
+    html+='<div class="hint" style="color:#E8930C;font-weight:700;margin-top:6px">'+
+      '已暂停：不再发新的补签请求，进行中的请求会完成。点「继续」恢复。</div>';
+  }
   if(s.status==='done'){
     html+='<div style="display:flex;gap:10px;margin-top:14px">';
     if(s.forum_done>0){
@@ -2779,6 +2783,10 @@ function renderMulti(s){
       if((a.forum_invalid||0)>0){
         html+='<div class="hint" style="color:#8A90A0;margin-top:4px">已跳过 '+
           (a.forum_invalid||0)+' 个吧（手动标记的失效吧）</div>';
+      }
+      if(a.paused){
+        html+='<div class="hint" style="color:#E8930C;font-weight:700;'+
+          'margin-top:6px">已暂停：不再发新请求，点「继续」恢复。</div>';
       }
       if(a.status==='done'){
         html+='<div class="hint" style="margin-top:6px">补签成功 '+
@@ -3083,6 +3091,10 @@ function renderLikeState(s){
   btn.disabled=busy; btn.textContent=busy?'随机点赞进行中…':'开始随机点赞';
   var html='<div class="card"><div class="title">随机点赞'+
     (busy?'（进行中）':'（已完成）')+'</div>';
+  if(s.paused){
+    html+='<div class="hint" style="color:#E8930C;font-weight:700">'+
+      '已暂停：不再发新的取帖/点赞请求，进行中的会完成。点「继续」恢复。</div>';
+  }
   html+='<div class="hint">账号进度 '+(s.account_done||0)+' / '+
     (s.account_total||0)+'</div>';
   if(busy){html+='<div class="spinner" style="margin:12px 0 0"></div>';}

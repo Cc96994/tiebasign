@@ -802,6 +802,9 @@ def test_banned_and_invalid_forums():
     check("340006 其余吧继续签到", state["forum_success"] == 1, state)
     check("报告说明已查封跳过",
           "已查封/关闭" in signer.report_text())
+    check("吧已查封会自动记入失效贴吧",
+          invalid.is_invalid("closed") is True, invalid.list_forums())
+    invalid.remove_forum("closed")
 
     reset_files()
     invalid.add_forum("badmark")

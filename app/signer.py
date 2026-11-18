@@ -241,6 +241,12 @@ def is_paused():
     return _pause.is_set()
 
 
+async def _wait_until_resumed():
+    """暂停期间等待（只用于入口/翻页等阶段之间的检查点）。"""
+    while _pause.is_set():
+        await asyncio.sleep(0.2)
+
+
 def set_paused(paused):
     """手动暂停/继续：只停新的补签请求，进行中的请求会自然完成。"""
     if paused:
@@ -252,6 +258,8 @@ def set_paused(paused):
         if _state is not None and _state.get("status") in ("starting",
                                                            "running"):
             _state["paused"] = paused
+            _state["step"] = ("已暂停（不再发新请求）" if paused
+                              else "逐吧补签")
             if _state.get("mode") == "multi":
                 for sub in _state.get("accounts") or []:
                     if sub.get("status") in ("pending", "running"):
@@ -552,6 +560,10 @@ async def _sign_forums(client, state, forums, secret=None, concurrency=None,
                         # 0.6.2：吧已查封/关闭不是账号被限流，直接跳过、
                         # 不计失败，也不触发熔断/硬停。
                         state["forum_banned"] += 1
+                        try:
+                            invalid.add_forum(item["forum"])
+                        except Exception:  # noqa: BLE001 - 标记失败不影响签到
+                            pass
                     else:
                         _append_failure_in(state, item)
                         if category in (tieba_codes.CAT_CAPTCHA,
@@ -591,6 +603,7 @@ async def _sign_forums(client, state, forums, secret=None, concurrency=None,
 
 async def _fetch_follow_page(client, state, secret, pn):
     """取关注吧列表的一页；出错时把整体状态置为 error 并返回 None。"""
+    await _wait_until_resumed()
     page_started = _now_ms()
     try:
         res = await client.get_self_follow_forums(pn=pn, rn=200)
@@ -696,6 +709,7 @@ async def _sign_async(state, bduss):
             await _sign_growth_step(client, state, secret)
 
             # ---- 2. Baidu web one-key sign (msign) -----------------------
+            await _wait_until_resumed()
             _update_in(state, step="网页一键签到")
             _log("run={} msign start".format(state.get("run_id")), secret)
             msign_started = _now_ms()
@@ -729,6 +743,7 @@ async def _sign_async(state, bduss):
                     item["raw"]), secret)
 
             # ---- 3. enumerate followed forums ----------------------------
+            await _wait_until_resumed()
             _update_in(state, step="获取关注吧列表")
             forums = await _fetch_follow_forums(client, state, secret)
             if forums is None:
@@ -747,6 +762,7 @@ async def _sign_async(state, bduss):
                 tier.sign_concurrency), secret)
 
             # ---- 4. sign each still-unsigned forum (single attempt) ------
+            await _wait_until_resumed()
             sign_started = _now_ms()
             try:
                 await _sign_forums(client, state, to_sign, secret,

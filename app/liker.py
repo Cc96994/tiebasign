@@ -48,6 +48,10 @@ _RN = 30
 #: L1/L2：进程内累积，每 20 个「ok 状态变化」才整文件落盘一次，结束再落一次。
 _FLUSH_EVERY = 20
 _MIN_LIKE_RATE = 1.0
+#: 0.6.3：点赞速率硬上限。档位表里 18 并发/0.05s 间隔算出来约 100 次/秒，
+#: 实测会触发 3200004/3280004；按当前可用的标准档估算，上限取 12 次/秒，
+#: 并且令牌桶 burst=1，避免开跑瞬间同时打出一批请求。
+_LIKE_RATE_CAP = 12.0
 #: L4：撞 3280004 后的全局冷却时间（秒）；测试可调小。
 _RL_BACKOFF = (5.0, 12.0)
 
@@ -327,6 +331,11 @@ def is_paused():
     return _pause.is_set()
 
 
+async def _wait_until_resumed():
+    while _pause.is_set():
+        await asyncio.sleep(0.2)
+
+
 def set_paused(paused):
     """手动暂停/继续：只停新的取帖/点赞请求，进行中的会自然完成。"""
     if paused:
@@ -338,10 +347,13 @@ def set_paused(paused):
         if _state is not None and _state.get("status") in ("starting",
                                                            "running"):
             _state["paused"] = paused
+            _state["step"] = ("已暂停（不再发新请求）" if paused
+                              else "逐个吧点赞")
             for sub in _state.get("accounts") or []:
                 if sub.get("status") in ("pending", "running"):
                     sub["paused"] = paused
-                    sub["step"] = "已暂停" if paused else "逐个吧点赞"
+                    sub["step"] = ("已暂停（不再发新请求）" if paused
+                                   else "逐个吧点赞")
     return paused
 
 
@@ -394,6 +406,31 @@ def start(pairs):
     return run_id, None
 
 
+def _rate_limit_state(data):
+    """当天学到的限速值（撞过 3280004 后降下来的速率）。"""
+    info = data.get("rate_limit") or {}
+    if info.get("date") != _today():
+        return None
+    try:
+        rate = float(info.get("rate") or 0)
+    except (TypeError, ValueError):
+        return None
+    return rate if rate > 0 else None
+
+
+def _like_rate_for_tier(tier):
+    return min(_LIKE_RATE_CAP, tiers.like_rate_per_sec(tier))
+
+
+def _starting_rate(tier, data):
+    """按档位算速率，再叠加当天学到的降速值，最后夹到硬上限。"""
+    rate = _like_rate_for_tier(tier)
+    learned = _rate_limit_state(data)
+    if learned:
+        rate = min(rate, learned)
+    return max(_MIN_LIKE_RATE, rate)
+
+
 def _describe(err):
     """统一分类器：返回 category/code/reason/advice/detail/raw。"""
     return errors.classify(err, subject="这个吧的点赞")
@@ -412,6 +449,14 @@ def _bump(aid, field):
                         sub["step"] = "逐个吧点赞 {}/{}".format(
                             checked, sub["total"])
                 return
+
+
+def _mark_invalid(fname):
+    """吧已查封：自动记入失效贴吧，下次运行不再请求它。"""
+    try:
+        invalid.add_forum(fname)
+    except Exception:  # noqa: BLE001 - 标记失败不影响点赞
+        pass
 
 
 def _add_failure(sub, fname, info):
@@ -441,6 +486,7 @@ async def _fetch_forums(client, sub):
     forums = []
     pn = 1
     while pn <= _MAX_FORUM_PAGES:
+        await _wait_until_resumed()
         res = await client.get_self_follow_forums(pn=pn, rn=200)
         rerr = getattr(res, "err", None)
         if rerr is not None:
@@ -471,6 +517,7 @@ async def _agree_with_retry(client, tid, sem, limiter, cooldown, sub, delay):
     """
     last_err = None
     for attempt in range(_LIKE_RETRIES + 1):
+        await _wait_until_resumed()
         wait = cooldown["until"] - time.monotonic()
         if wait > 0:
             await asyncio.sleep(wait)
@@ -517,7 +564,8 @@ async def _like_account_async(account, bduss):
                          tiers.max_open_level()))
     like_concurrency = max(1, tier.like_concurrency)
     like_delay = tuple(tier.like_delay)
-    like_rate = tiers.like_rate_per_sec(tier)
+    like_rate = _starting_rate(tier, cfg)
+    limiter = None
     _update_account(aid, tier_level=tier.level, tier_name=tier.name)
     run_started = _now_ms()
     store = _load()
@@ -564,7 +612,9 @@ async def _like_account_async(account, bduss):
             # L3：取帖与点赞分开限流，取帖不会把点赞的槽位占死。
             fetch_sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
             like_sem = asyncio.Semaphore(like_concurrency)
-            limiter = _RateLimiter(like_rate, like_concurrency)
+            # 0.6.3：burst=1，避免提升档位后开跑瞬间同时打出一批请求；
+            # 速率本身也被 _LIKE_RATE_CAP 和当天学到的降速值压住。
+            limiter = _RateLimiter(like_rate, 1.0)
             cooldown = {"until": 0.0}
             flags = {"stop": False}
             rng = random.SystemRandom()
@@ -599,6 +649,7 @@ async def _like_account_async(account, bduss):
                     info = _describe(exc)
                     if info["category"] == tieba_codes.CAT_FORUM_BANNED:
                         # 0.6.2：吧已查封/关闭，跳过、不算失败、不硬停。
+                        _mark_invalid(fname)
                         _bump(aid, "skipped")
                         _bump(aid, "checked")
                         return
@@ -612,6 +663,7 @@ async def _like_account_async(account, bduss):
                 if terr is not None:
                     info = _describe(terr)
                     if info["category"] == tieba_codes.CAT_FORUM_BANNED:
+                        _mark_invalid(fname)
                         _bump(aid, "skipped")
                         _bump(aid, "checked")
                         return
@@ -647,6 +699,7 @@ async def _like_account_async(account, bduss):
                 if err is not None:
                     info = _describe(err)
                     if info["category"] == tieba_codes.CAT_FORUM_BANNED:
+                        _mark_invalid(fname)
                         _bump(aid, "skipped")
                         _bump(aid, "checked")
                         return
@@ -683,5 +736,9 @@ async def _like_account_async(account, bduss):
     finally:
         # 当天点过的吧重跑会直接 skip，只有隔天首跑的数据才能证明提速；
         # 所以分段耗时必须落进 tiebasign_like.json，不能只在内存里。
+        # 0.6.3：撞过限流就把学到的速率记下来，当天后续运行直接从低速开始。
+        if limiter is not None and limiter.rate < like_rate:
+            store["rate_limit"] = {"date": _today(),
+                                   "rate": round(limiter.rate, 2)}
         _note_last_run(store, sub, _now_ms() - run_started)
         _flush()

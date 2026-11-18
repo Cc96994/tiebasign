@@ -443,6 +443,30 @@ def test_banned_and_invalid_forums():
     check("吧已查封跳过不计失败",
           sub2["failed"] == 0 and sub2["skipped"] >= 1, sub2)
     check("另一个吧正常点赞", sub2["success"] == 1, sub2)
+    check("吧已查封自动记入失效贴吧",
+          invalid.is_invalid("吧B") is True, invalid.list_forums())
+    invalid.remove_forum("吧B")
+
+
+def test_like_rate_cap():
+    """0.6.3：点赞速率封顶 + 当天自适应降速。"""
+    reset()
+    real_get = _REAL_TIER_GET
+    tiers.get = real_get
+    try:
+        check("标准档速率约 10.5",
+              abs(liker._like_rate_for_tier(tiers.get(1)) - 10.5) < 0.2,
+              liker._like_rate_for_tier(tiers.get(1)))
+        check("极速档速率封顶 12",
+              liker._like_rate_for_tier(tiers.get(3)) == 12.0)
+        data = {"rate_limit": {"date": liker._today(), "rate": 3.0}}
+        check("当天学到的降速优先",
+              liker._starting_rate(tiers.get(3), data) == 3.0)
+        data2 = {"rate_limit": {"date": "2000-01-01", "rate": 3.0}}
+        check("隔天重新按档位",
+              liker._starting_rate(tiers.get(3), data2) == 12.0)
+    finally:
+        tiers.get = _TEST_TIER_GET
 
 
 def test_pause_flag():
@@ -455,6 +479,28 @@ def test_pause_flag():
     check("点赞继续后标志清除", liker.is_paused() is False)
 
 
+def test_pause_pauses_likes():
+    """0.6.2：暂停后不再发新的点赞请求。"""
+    reset()
+    forums = [types.SimpleNamespace(fname="p{}".format(i))
+              for i in range(6)]
+    FakeClient.forums = forums
+    FakeClient.thread_delay = 0.05
+    fake_module = types.ModuleType("aiotieba")
+    fake_module.Client = FakeClient
+    sys.modules["aiotieba"] = fake_module
+    liker.start([(ACCOUNT, "fake-bduss")])
+    liker.set_paused(True)
+    time.sleep(0.15)
+    client = FakeClient.instances[-1] if FakeClient.instances else None
+    before = len(client.agree_calls) if client else 0
+    time.sleep(0.25)
+    after = len(client.agree_calls) if client else 0
+    check("暂停后不再发点赞请求", after == before, (before, after))
+    liker.set_paused(False)
+    wait_done()
+
+
 def main():
     print("== 每吧一个赞 =="); test_one_like_per_forum()
     print("== 每日限制 =="); test_daily_guard_and_next_day()
@@ -464,7 +510,9 @@ def main():
     print("== 限流退避 =="); test_rate_limit_cooldown()
     print("== 档位设置 =="); test_tier_settings()
     print("== 查封/失效吧（0.6.2） =="); test_banned_and_invalid_forums()
+    print("== 点赞速率上限（0.6.3） =="); test_like_rate_cap()
     print("== 暂停标志（0.6.2） =="); test_pause_flag()
+    print("== 暂停请求（0.6.2） =="); test_pause_pauses_likes()
     print()
     print("{} checks, {} failed".format(TOTAL[0], len(FAILS)))
     if FAILS:

@@ -17,8 +17,8 @@
 ## 版本与下载
 - **线上正式版：0.5.3**（arm64-v8a，minSdk 23 / Android 8.0+，targetSdk 34）——
   安装包在 **GitHub Releases** 下载：`tieba-sign-assistant-0.5.3-arm64-v8a-release.apk`（附 `update.json` / `SHA256SUMS`）
-- **0.6.2 源码已完成，待构建与发布**：版本号已同步到 spec / 界面 / updater 三处
-  （versionCode 1023602）。构建后按 `GITHUB_PREP.md` 把 APK + `update.json` + `SHA256SUMS`
+- **0.6.3 源码已完成，待构建与发布**：版本号已同步到 spec / 界面 / updater 三处
+  （versionCode 1023603）。构建后按 `GITHUB_PREP.md` 把 APK + `update.json` + `SHA256SUMS`
   三个文件一起挂到同一个 tag 下（`update.json` 是 App 判断版本与校验的关键，见下文）
 - 若手机安装过同版本 debug 测试包，请先卸载再安装正式版（签名不同）
 
