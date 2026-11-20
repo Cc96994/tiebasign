@@ -608,6 +608,27 @@ def test_cache_roundtrip():
     check("首轮确实取过帖", any(first_calls), first_calls)
 
 
+def test_settings_survive_running_flush():
+    """0.6.7：运行中改的点赞设置不会被本轮落盘覆盖回旧值。"""
+    reset()
+    forums = [types.SimpleNamespace(fname="sf{}".format(i))
+              for i in range(3)]
+    FakeClient.forums = forums
+    FakeClient.agree_delay = 0.3
+    fake_module = types.ModuleType("aiotieba")
+    fake_module.Client = FakeClient
+    sys.modules["aiotieba"] = fake_module
+    rid, err = liker.start([(ACCOUNT, "fake-bduss")])
+    if err:
+        raise AssertionError(err)
+    time.sleep(0.1)
+    liker.save_settings({"batch_interval_seconds": 42})
+    wait_done()
+    got = liker._load().get("batch_interval_seconds")
+    check("运行中改的批间隔没被落盘覆盖", got == 42, got)
+    liker.save_settings({"batch_interval_seconds": 10})
+
+
 def test_batch_pacing():
     """0.6.7：按档位并发分批，一批点完等 batch_interval 秒再下一批。"""
     reset()
@@ -719,6 +740,7 @@ def main():
     print("== 缓存命中（0.6.6） =="); test_cache_roundtrip()
     print("== 休息窗（0.6.6） =="); test_rest_gate()
     print("== 分批间隔设置（0.6.7） =="); test_batch_interval_settings()
+    print("== 运行中设置不被覆盖（0.6.7） =="); test_settings_survive_running_flush()
     print("== 按档位分批（0.6.7） =="); test_batch_pacing()
     print("== 暂停请求（0.6.2） =="); test_pause_pauses_likes()
     print()

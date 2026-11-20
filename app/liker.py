@@ -914,11 +914,13 @@ async def _like_account_async(account, bduss):
 
     def _flush():
         try:
-            # 运行期间用户可能在设置页改了档位：落盘前先把 level 从磁盘
-            # 合回来，别让本轮开始时读到的旧值把新设置覆盖掉。
+            # 运行期间用户可能在设置页改了档位/间隔/缓存/休息：落盘前先把
+            # 这些设置从磁盘合回来，别让本轮开始时读到的旧值把新设置覆盖掉。
             fresh = _load()
-            if "level" in fresh:
-                store["level"] = fresh["level"]
+            for key in ("level", "limit_pause_minutes", "cache_enabled",
+                        "rest_minutes", "batch_interval_seconds"):
+                if key in fresh:
+                    store[key] = fresh[key]
             _save(store)
         except Exception:  # noqa: BLE001 - 落盘失败不能打断点赞
             pass
