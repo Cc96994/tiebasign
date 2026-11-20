@@ -39,7 +39,9 @@ _TEST_LIKE_TIER = tiers.LikeTier(level=1, name="二档", icon="",
 _TEST_LIKE_GET = lambda level: _TEST_LIKE_TIER
 tiers.get_like = _TEST_LIKE_GET
 # 测试里不要真的等 5 秒/2 分钟；节奏逻辑由专门用例验证。
-liker._LIKE_INTERVAL = 0.0
+# 0.6.7：批间间隔由 helper 读设置；普通用例把它置 0，专项用例再显式给小值。
+_REAL_BATCH_INTERVAL = liker._batch_interval_seconds
+liker._batch_interval_seconds = lambda data: 0.0
 liker._REST_EVERY = 0
 
 TOTAL = [0]
@@ -102,6 +104,7 @@ class FakeClient:
     agree_errs = {}
     agree_sequence = {}
     agree_tids = []
+    agree_times = []
     tid_map = {}
     agree_delay = 0.0
     thread_delay = 0.0
@@ -151,6 +154,7 @@ class FakeClient:
     async def agree(self, tid):
         self.agree_calls.append(tid)
         FakeClient.agree_tids.append(tid)
+        FakeClient.agree_times.append(time.monotonic())
         FakeClient.agree_active += 1
         FakeClient.agree_peak = max(FakeClient.agree_peak,
                                     FakeClient.agree_active)
@@ -170,6 +174,7 @@ class FakeClient:
 def reset_counters():
     FakeClient.agree_active = FakeClient.agree_peak = 0
     FakeClient.fetch_active = FakeClient.fetch_peak = 0
+    FakeClient.agree_times = []
     FakeClient.agree_delay = 0.0
     FakeClient.thread_delay = 0.0
     FakeClient.agree_sequence = {}
@@ -344,16 +349,16 @@ def test_batched_writes():
 
 
 def test_fetch_and_like_concurrency():
-    """L3：取帖与点赞各用各的信号量（12 / 5）。"""
+    """0.6.7：按档位分批后，批内取帖/点赞并发都不超过档位并发。"""
     reset()
     forums = [types.SimpleNamespace(fname="吧{:02d}".format(i))
               for i in range(12)]
     state = run_like(forums, agree_delay=0.03, thread_delay=0.03)
-    check("L3：取帖并发可以超过点赞并发（>5）",
-          FakeClient.fetch_peak > 5, FakeClient.fetch_peak)
-    check("L3：取帖并发不超过 12", FakeClient.fetch_peak <= 12,
-          FakeClient.fetch_peak)
-    check("L3：点赞并发不超过 5", FakeClient.agree_peak <= 5,
+    check("分批后取帖并发不超过档位 5",
+          FakeClient.fetch_peak <= 5, FakeClient.fetch_peak)
+    check("分批后点赞并发不超过 5", FakeClient.agree_peak <= 5,
+          FakeClient.agree_peak)
+    check("批内确实并发（>1）", FakeClient.agree_peak > 1,
           FakeClient.agree_peak)
     check("L3：12 个吧全部成功", state["accounts"][0]["success"] == 12,
           state["accounts"][0]["success"])
@@ -373,8 +378,7 @@ def test_rate_limit_cooldown():
         liker._limit_wait_seconds = lambda err, minutes: (0.01, False)
         try:
             resp, err = await liker._agree_with_retry(
-                client, 7, sem, limiter, cooldown, flags, sub,
-                liker._IntervalGate(0), 5)
+                client, 7, sem, limiter, cooldown, flags, sub, 5)
         finally:
             liker._limit_wait_seconds = old
         return resp, err, limiter, cooldown, sem, flags
@@ -401,8 +405,7 @@ def test_rate_limit_cooldown():
         liker._limit_wait_seconds = lambda err, minutes: (0.2, False)
         try:
             task = asyncio.ensure_future(liker._agree_with_retry(
-                client, 7, sem, limiter, cooldown, flags, sub,
-                liker._IntervalGate(0), 5))
+                client, 7, sem, limiter, cooldown, flags, sub, 5))
             await asyncio.sleep(0.05)   # 第一次请求已撞限流，正在冷却
             got = await asyncio.wait_for(sem.acquire(), timeout=0.05)
             sem.release()
@@ -477,9 +480,11 @@ def test_tier_settings():
 
 
 def test_tier_applied_to_like():
-    """0.6.5：设置里的点赞档位真的传到本次运行状态/并发。"""
+    """0.6.5/0.6.7：设置里的点赞档位和批间间隔真的传到本次运行状态。"""
     reset()
     tiers.get_like = _REAL_LIKE_GET
+    old = liker._batch_interval_seconds
+    liker._batch_interval_seconds = _REAL_BATCH_INTERVAL
     try:
         liker.save_settings({"level": 3})
         forums = [types.SimpleNamespace(fname="t{}".format(i))
@@ -489,8 +494,11 @@ def test_tier_applied_to_like():
         check("四档应用到点赞状态",
               sub["tier_level"] == 3 and sub["tier_name"] == "四档"
               and sub["like_concurrency"] == 12, sub)
+        check("批间间隔默认 10 秒写进运行状态",
+              sub["batch_interval_seconds"] == 10, sub)
         liker.save_settings({"level": 1})
     finally:
+        liker._batch_interval_seconds = old
         tiers.get_like = _TEST_LIKE_GET
 
 
@@ -600,16 +608,53 @@ def test_cache_roundtrip():
     check("首轮确实取过帖", any(first_calls), first_calls)
 
 
-def test_interval_gate():
-    """0.6.6：两个请求至少间隔设定秒数。"""
-    async def scenario():
-        gate = liker._IntervalGate(0.05)
-        started = time.monotonic()
-        await gate.wait()
-        await gate.wait()
-        return time.monotonic() - started
+def test_batch_pacing():
+    """0.6.7：按档位并发分批，一批点完等 batch_interval 秒再下一批。"""
+    reset()
+    old = liker._batch_interval_seconds
+    liker._batch_interval_seconds = lambda data: 0.12
+    try:
+        forums = [types.SimpleNamespace(fname="bp{}".format(i))
+                  for i in range(7)]
+        state = run_like(forums, agree_delay=0.01)
+    finally:
+        liker._batch_interval_seconds = old
+    sub = state["accounts"][0]
+    check("分批：7 个吧全部点赞成功", sub["success"] == 7, sub)
+    check("分批：批内并发不超过档位 5",
+          FakeClient.agree_peak <= 5, FakeClient.agree_peak)
+    times = FakeClient.agree_times
+    check("分批：点赞请求总数 7", len(times) == 7, len(times))
+    if len(times) == 7:
+        first_gap = times[4] - times[0]
+        batch_gap = times[5] - times[4]
+        check("分批：前 5 个赞在同一批内（不等间隔）",
+              first_gap < 0.1, first_gap)
+        check("分批：第 6 个赞等完批间间隔才发",
+              batch_gap >= 0.1, batch_gap)
 
-    check("请求间隔门生效", asyncio.run(scenario()) >= 0.035)
+
+def test_batch_interval_settings():
+    """0.6.7：批间间隔默认 10 秒，可改 1–120。"""
+    reset()
+    old = liker._batch_interval_seconds
+    liker._batch_interval_seconds = _REAL_BATCH_INTERVAL
+    try:
+        st = liker.get_settings()
+        check("批间间隔默认 10 秒",
+              st["batch_interval_seconds"] == 10, st)
+        st = liker.save_settings({"batch_interval_seconds": 15})
+        check("批间间隔可保存",
+              st["batch_interval_seconds"] == 15, st)
+        st = liker.save_settings({"batch_interval_seconds": 999})
+        check("批间间隔夹到 120",
+              st["batch_interval_seconds"] == 120, st)
+        st = liker.save_settings({"batch_interval_seconds": 0})
+        check("批间间隔夹到 1",
+              st["batch_interval_seconds"] == 1, st)
+        liker.save_settings({"batch_interval_seconds": 10})
+    finally:
+        liker._batch_interval_seconds = old
 
 
 def test_rest_gate():
@@ -673,7 +718,8 @@ def main():
     print("== 帖子缓存（0.6.6） =="); test_cache_helpers()
     print("== 缓存命中（0.6.6） =="); test_cache_roundtrip()
     print("== 休息窗（0.6.6） =="); test_rest_gate()
-    print("== 请求间隔（0.6.6） =="); test_interval_gate()
+    print("== 分批间隔设置（0.6.7） =="); test_batch_interval_settings()
+    print("== 按档位分批（0.6.7） =="); test_batch_pacing()
     print("== 暂停请求（0.6.2） =="); test_pause_pauses_likes()
     print()
     print("{} checks, {} failed".format(TOTAL[0], len(FAILS)))

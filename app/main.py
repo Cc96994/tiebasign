@@ -642,7 +642,7 @@ def _page_settings():
         "<span>随机点赞设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.6.6 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.6.7 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -858,11 +858,12 @@ def _tier_section(kind, st):
         track = ""
     else:
         title = "随机点赞速度档位"
-        desc = ("四个档位只改并发；速率自适应：先在保守速率跑，没被限流才"
-                "逐步加速，撞到限流会减半并记住。第四档红色，会先二次确认。")
+        desc = ("四个档位只改并发：每批同时点多少个吧。一批点完停「分批间隔」"
+                "（默认 10 秒）再点下一批；速率自适应仍在兜底，撞到限流会"
+                "减半并记住。第四档红色，会先二次确认。")
         detail = ("四个档位的并发分别是 3 / 5 / 8 / 12；前两档蓝色、第三档"
-                  "黄色、第四档红色。点赞速率还会按运行结果自适应，避免一"
-                  "上来就打满触发 3280004。")
+                  "黄色、第四档红色。每批点完等「分批间隔」秒再点下一批；"
+                  "令牌桶与自动暂停继续兜底，避免一上来就打满触发 3280004。")
         track = " like-track"
     return (
         "<div class='card'><div class='title'>{}速度档位</div>"
@@ -1093,6 +1094,14 @@ def _page_settings_like():
         "</div>"
     ).format(lk.get("rest_minutes") if lk.get("rest_minutes") is not None
              else 2)
+    batch_card = (
+        "<div class='card'><div class='title'>分批间隔</div>"
+        "<div class='form'><label>每批之间等待（秒，1-120）</label>"
+        "<input class='input' type='number' id='lk_batch' min='1' max='120' "
+        "value='{}' onchange='lkSaveBatch()'></div>"
+        "<div class='hint'>按速度档位的并发数成批点赞：一批点完停这么久，"
+        "再点下一批。默认 10 秒，下次开始点赞时生效。</div></div>"
+    ).format(lk.get("batch_interval_seconds") or 10)
     auto_card = (
         "<div class='card'><div class='title'>每日自动点赞</div>"
         "<label class='menu-item'><span>每天自动执行</span>"
@@ -1160,6 +1169,15 @@ body:JSON.stringify({rest_minutes:v})})
 if(j.ok){lkToast('已保存：每 10 个赞休息 '+v+' 分钟');}
 else{lkErr(j.detail||'保存失败');}})
 .catch(function(e){lkErr('请求失败：'+e);});}
+function lkSaveBatch(){
+var v=parseInt(document.getElementById('lk_batch').value,10);
+fetch('/api/like/settings',{method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify({batch_interval_seconds:v})})
+.then(function(r){return r.json();}).then(function(j){
+if(j.ok){lkToast('已保存：每批之间等 '+v+' 秒');}
+else{lkErr(j.detail||'保存失败');}})
+.catch(function(e){lkErr('请求失败：'+e);});}
 function lkSaveCache(){
 var v=document.getElementById('lk_cache').checked;
 fetch('/api/like/settings',{method:'POST',
@@ -1195,8 +1213,8 @@ else{lkErr(j.detail||'启动失败');}})
 lkPollCache();
 </script>
 """
-    html_part = (intro + _tier_section("like", lk) + pause_card + cache_card
-                 + rest_card + auto_card)
+    html_part = (intro + _tier_section("like", lk) + batch_card + pause_card
+                 + cache_card + rest_card + auto_card)
     return _page("随机点赞设置",
                  html_part + _tier_script("like", lk) + script, "settings")
 

@@ -364,6 +364,9 @@ def http_checks():
               status == 200 and "随机点赞设置" in like_page
               and all(k in like_page for k in
                       ("lk_auto", "lk_auto_mode", "lk_auto_time")))
+        check("随机点赞设置页有分批间隔输入框",
+              status == 200 and "id='lk_batch'" in like_page
+              and "每批之间等待" in like_page)
         check("随机点赞设置页有速度档位滑块",
               status == 200 and "id='tier_like'" in like_page
               and "type='range'" in like_page
@@ -395,17 +398,25 @@ def http_checks():
               status == 200 and body["ok"] is True
               and body["settings"]["limit_pause_minutes"] == 7, body)
         status, body = post("/api/like/settings", {
-            "cache_enabled": False, "rest_minutes": 3})
-        check("帖子缓存/休息设置可保存",
+            "cache_enabled": False, "rest_minutes": 3,
+            "batch_interval_seconds": 15})
+        check("帖子缓存/休息/批间间隔设置可保存",
               status == 200 and body["ok"] is True
               and body["settings"]["cache_enabled"] is False
-              and body["settings"]["rest_minutes"] == 3, body)
+              and body["settings"]["rest_minutes"] == 3
+              and body["settings"]["batch_interval_seconds"] == 15, body)
+        status, body = post("/api/like/settings",
+                            {"batch_interval_seconds": 999})
+        check("批间间隔夹到 120",
+              status == 200 and body["ok"] is True
+              and body["settings"]["batch_interval_seconds"] == 120, body)
         status, raw = get("/api/like/cache/state")
         check("缓存状态可读取",
               status == 200 and json.loads(raw)["state"]["status"] == "idle")
         post("/api/like/settings", {"limit_pause_minutes": 5,
                                     "cache_enabled": True,
-                                    "rest_minutes": 2})
+                                    "rest_minutes": 2,
+                                    "batch_interval_seconds": 10})
         status, body = post("/api/like/settings", {"level": 4})
         check("点赞只有四档，level=4 被拒",
               status == 200 and body["ok"] is False, body)

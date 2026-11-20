@@ -10,9 +10,9 @@
 实现边界：
   * 只点主楼赞（``Client.agree(tid)``），不点楼中楼；
   * 跳过置顶帖/被屏蔽帖；某吧首页没有可点的帖子就跳过；
-  * 每个账号串行跑自己的关注吧，同一时刻只发 1 个点赞请求，并在每次
-    ``agree`` 前停 2~3.5 秒；遇到 3280004（操作太频繁）会退避重试，
-    避免“大多数吧都 3280004”；
+  * 每个账号串行跑自己的关注吧；同一账号内按速度档位并发（3/5/8/12）
+    分批点赞，一批点完再按 ``batch_interval_seconds``（默认 10 秒）等待，
+    然后进入下一批；遇到 3280004（操作太频繁）自动暂停，到点续跑；
   * 数据文件 ``<ANDROID_PRIVATE>/tiebasign_like.json``，不含 BDUSS；
   * 每日记录按账号 + 吧名，成功一次当天不再点这个吧。
 
@@ -53,11 +53,15 @@ _LIMIT_PAUSE_MAX = 60
 _LIMIT_RE = re.compile(
     r"(\d+)\s*(秒|分钟|小时|min|mins|minute|minutes|sec|secs|second|seconds|"
     r"hour|hours)", re.IGNORECASE)
-#: 0.6.6：每个吧提前缓存 7 个候选帖子；点赞请求固定间隔 5 秒（不显示）；
-#: 每 10 个赞休息 rest_minutes 分钟（默认 2，可改）。
+#: 0.6.6：每个吧提前缓存 7 个候选帖子；每 10 个赞休息 rest_minutes 分钟
+#: （默认 2，可改）。0.6.7：点赞按档位并发分批，批间等待可改。
 _CACHE_BATCH = 7
 _CACHE_USED_MAX = 30
-_LIKE_INTERVAL = 5.0
+#: 0.6.7：每批最多「档位并发数」个点赞同时发出，批与批之间停
+#: ``batch_interval_seconds`` 秒（默认 10，可改 1–120）。
+_BATCH_INTERVAL_DEFAULT = 10
+_BATCH_INTERVAL_MIN = 1
+_BATCH_INTERVAL_MAX = 120
 _REST_EVERY = 10
 _REST_DEFAULT_MINUTES = 2
 _REST_MAX_MINUTES = 60
@@ -149,28 +153,6 @@ class _RateLimiter:
         self.capacity = max(1.0, min(self.capacity, self.rate))
 
 
-class _IntervalGate:
-    """0.6.6：全局点赞请求间隔，保证两次请求至少隔 ``seconds`` 秒。
-
-    并发再高也只按节奏逐个放行；不再依赖每个任务的随机 sleep。
-    """
-
-    def __init__(self, seconds):
-        self.seconds = max(0.0, float(seconds))
-        self._next = 0.0
-        self._lock = asyncio.Lock()
-
-    async def wait(self):
-        if self.seconds <= 0:
-            return
-        async with self._lock:
-            now = time.monotonic()
-            wait = max(0.0, self._next - now)
-            self._next = max(now, self._next) + self.seconds
-        if wait > 0:
-            await asyncio.sleep(wait)
-
-
 def _today():
     return time.strftime("%Y-%m-%d")
 
@@ -203,6 +185,19 @@ def _clamp_rest_minutes(value):
 def _rest_minutes(data):
     return _clamp_rest_minutes(
         data.get("rest_minutes", _REST_DEFAULT_MINUTES))
+
+
+def _clamp_batch_interval(value):
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        seconds = _BATCH_INTERVAL_DEFAULT
+    return max(_BATCH_INTERVAL_MIN, min(_BATCH_INTERVAL_MAX, seconds))
+
+
+def _batch_interval_seconds(data):
+    return _clamp_batch_interval(
+        data.get("batch_interval_seconds", _BATCH_INTERVAL_DEFAULT))
 
 
 def _rest_seconds(minutes):
@@ -433,6 +428,7 @@ def get_settings():
         "cache_enabled": bool(data.get("cache_enabled", True)),
         "cache_batch": _CACHE_BATCH,
         "rest_minutes": _rest_minutes(data),
+        "batch_interval_seconds": _batch_interval_seconds(data),
         "max_level": tiers.LIKE_TIER_COUNT - 1,
         "max_open_level": tiers.max_like_level(),
         "red_unlocked": True,
@@ -460,6 +456,9 @@ def save_settings(payload):
     if "rest_minutes" in payload:
         data["rest_minutes"] = _clamp_rest_minutes(
             payload.get("rest_minutes"))
+    if "batch_interval_seconds" in payload:
+        data["batch_interval_seconds"] = _clamp_batch_interval(
+            payload.get("batch_interval_seconds"))
     _save(data)
     return get_settings()
 
@@ -483,6 +482,7 @@ def _new_state(run_id, pairs):
             "tier_level": None,
             "tier_name": None,
             "like_concurrency": 0,
+            "batch_interval_seconds": 0,
             "like_rate": 0,
             "paused": False,
             "auto_pause_until": 0,
@@ -818,7 +818,7 @@ async def _wait_rest(flags, sub):
 
 
 async def _agree_with_retry(client, tid, sem, limiter, cooldown, flags, sub,
-                            gate, pause_minutes):
+                            pause_minutes):
     """点赞；3280004 时自动暂停，再按百度解除时间/设置时长后重试一次。
 
     L4：等待放在信号量**外面**，并写进全局冷却窗 ``cooldown``：撞一次之后
@@ -826,6 +826,8 @@ async def _agree_with_retry(client, tid, sem, limiter, cooldown, flags, sub,
     L6：每次撞限流都把令牌桶速率砍半（``limiter.slow_down``）。
     0.6.5：优先从百度文案里解析「X 分钟/秒/小时」作为解除时间；读不到就用
     ``limit_pause_minutes``（默认 5 分钟）。等待结束后自动继续。
+    0.6.7：逐请求的固定间隔已经去掉，节拍由调用方的「按档位分批 + 批间
+    等待」控制；这里只保留令牌桶这一层安全阈值。
     """
     last_err = None
     for attempt in range(_LIKE_RETRIES + 1):
@@ -841,10 +843,10 @@ async def _agree_with_retry(client, tid, sem, limiter, cooldown, flags, sub,
                 _update_account(
                     sub["account_id"], auto_pause_until=0,
                     auto_pause_text="", step="逐个吧点赞")
-        await gate.wait()
         await limiter.acquire()
         await sem.acquire()
         try:
+            flags["agree_attempts"] = flags.get("agree_attempts", 0) + 1
             agree_started = _now_ms()
             try:
                 resp = await client.agree(tid)
@@ -897,11 +899,14 @@ async def _like_account_async(account, bduss):
     like_concurrency = max(1, tier.concurrency)
     like_rate = _starting_rate(tier, cfg)
     rest_minutes = _rest_minutes(cfg)
+    batch_interval = _batch_interval_seconds(cfg)
     cache_enabled = bool(cfg.get("cache_enabled", True))
     limiter = None
     flags = {"stop": False, "rate_limited": 0}
     _update_account(aid, tier_level=tier.level, tier_name=tier.name,
-                    like_concurrency=like_concurrency, like_rate=like_rate)
+                    like_concurrency=like_concurrency,
+                    batch_interval_seconds=int(batch_interval),
+                    like_rate=like_rate)
     run_started = _now_ms()
     store = _load()
     flush = {"changes": 0}
@@ -950,8 +955,9 @@ async def _like_account_async(account, bduss):
             like_sem = asyncio.Semaphore(like_concurrency)
             # 0.6.3：burst=1，避免提升档位后开跑瞬间同时打出一批请求；
             # 速率本身也被 _LIKE_RATE_CAP 和当天学到的降速值压住。
-            limiter = _RateLimiter(like_rate, 1.0)
-            interval_gate = _IntervalGate(_LIKE_INTERVAL)
+            # 0.6.7：节拍改由「按档位分批 + 批间等待」控制。令牌桶的突发额度
+            # 给到一批的并发数，批内才真能同时发 N 个；批间空闲足够回满。
+            limiter = _RateLimiter(like_rate, float(like_concurrency))
             cooldown = {"until": 0.0}
             rng = random.SystemRandom()
 
@@ -1046,11 +1052,11 @@ async def _like_account_async(account, bduss):
                     _bump(aid, "skipped")
                     _bump(aid, "checked")
                     return
-                # 点赞接口对频率很敏感：首次请求前停一小段，限流退避见
-                # _agree_with_retry（冷却窗在信号量外面）。
+                # 点赞接口对频率很敏感；0.6.7 的节拍在批与批之间（见下面的
+                # 分批循环），这里只处理限流退避（冷却窗在信号量外面）。
                 resp, err = await _agree_with_retry(
                     client, tid, like_sem, limiter, cooldown, flags, sub,
-                    interval_gate, pause_minutes)
+                    pause_minutes)
                 if flags["stop"]:
                     _bump(aid, "skipped")
                     _bump(aid, "checked")
@@ -1114,9 +1120,34 @@ async def _like_account_async(account, bduss):
                         rest_text=flags["rest_text"],
                         step="点赞休息中")
 
+            # 0.6.7：按档位并发分批。当天已经点过的吧在本地就能判定，
+            # 先剔出去，免得整批都是「跳过」还傻等一个批间隔。
+            pending = []
+            for forum in forums:
+                fname = str(getattr(forum, "fname", "") or "")
+                rec = _get_forum_record(store, aid, fname) if fname else None
+                if rec and rec.get("ok"):
+                    _bump(aid, "skipped")
+                    _bump(aid, "checked")
+                else:
+                    pending.append(forum)
             like_started = _now_ms()
             try:
-                await asyncio.gather(*(one(f) for f in forums))
+                for start in range(0, len(pending), like_concurrency):
+                    if flags["stop"]:
+                        for _forum in pending[start:]:
+                            _bump(aid, "skipped")
+                        break
+                    await _wait_if_paused()
+                    batch = pending[start:start + like_concurrency]
+                    agrees_before = flags.get("agree_attempts", 0)
+                    await asyncio.gather(*(one(f) for f in batch))
+                    # 只有这一批真的发过点赞请求，才需要为下一批等间隔；
+                    # 全是本地跳过/取帖失败时没必要空等。
+                    if (start + like_concurrency < len(pending)
+                            and not flags["stop"]
+                            and flags.get("agree_attempts", 0) > agrees_before):
+                        await asyncio.sleep(batch_interval)
             finally:
                 _phase_add(sub, PHASE_LIKE, like_started)
             if flags.get("limit_stop"):
