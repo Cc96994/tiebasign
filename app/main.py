@@ -635,7 +635,7 @@ def _page_settings():
         "<a class='menu-item' href='/settings/sign'>"
         "<span>签到速度档位</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/invalid'>"
-        "<span>失效贴吧</span><span class='arrow'>›</span></a>"
+        "<span>标记失效贴吧</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/waterpost'>"
         "<span>自动水贴设置</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/groupsign'>"
@@ -644,7 +644,7 @@ def _page_settings():
         "<span>随机点赞设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.6.4 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.6.5 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -1021,7 +1021,7 @@ def _page_settings_invalid():
     if not rows:
         rows.append("<div class='hint'>还没有标记失效的吧。</div>")
     body = (
-        "<div class='topbar'>失效贴吧</div><main>"
+        "<div class='topbar'>标记失效贴吧</div><main>"
         "<div class='card'><div class='title'>说明</div>"
         "<div class='hint'>有的吧已经被查封/关闭，但账号还关注着它，签到和点赞"
         "会一直报错。把吧名加到这里，之后签到和点赞会直接跳过它，不报错。</div>"
@@ -1054,7 +1054,7 @@ function tierAddForum(){
 function tierRemoveForum(name){badPost('remove',name);}
 </script>
 """
-    return _page("失效贴吧", body + script, "settings")
+    return _page("标记失效贴吧", body + script, "settings")
 
 
 def _page_settings_like():
@@ -1068,6 +1068,15 @@ def _page_settings_like():
         "每个吧每天最多一次；只点主楼赞，失败不影响签到。<br>"
         "签到页的「开始随机点赞」随时可以手动执行。</div></div>"
     )
+    pause_card = (
+        "<div class='card'><div class='title'>被限流后自动暂停</div>"
+        "<div class='form'><label>等待时间（分钟，1-60）</label>"
+        "<input class='input' type='number' id='lk_pause_minutes' "
+        "min='1' max='60' value='{}' onchange='lkSavePause()'></div>"
+        "<div class='hint'>检测到「操作太频繁」后自动暂停、不再发新点赞；"
+        "百度文案里能读到解除时间就按它，读不到就按这里的分钟数，"
+        "时间到自动继续。</div></div>"
+    ).format(lk.get("limit_pause_minutes") or 5)
     auto_card = (
         "<div class='card'><div class='title'>每日自动点赞</div>"
         "<label class='menu-item'><span>每天自动执行</span>"
@@ -1117,9 +1126,18 @@ headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
 .then(function(r){return r.json();}).then(function(j){
 if(j.ok){lkToast('设置已保存');}else{lkErr(j.detail||'保存失败');}})
 .catch(function(e){lkErr('请求失败：'+e);});}
+function lkSavePause(){
+var v=parseInt(document.getElementById('lk_pause_minutes').value,10);
+fetch('/api/like/settings',{method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify({limit_pause_minutes:v})})
+.then(function(r){return r.json();}).then(function(j){
+if(j.ok){lkToast('已保存：限流后暂停 '+v+' 分钟');}
+else{lkErr(j.detail||'保存失败');}})
+.catch(function(e){lkErr('请求失败：'+e);});}
 </script>
 """
-    html_part = intro + _tier_section("like", lk) + auto_card
+    html_part = intro + _tier_section("like", lk) + pause_card + auto_card
     return _page("随机点赞设置",
                  html_part + _tier_script("like", lk) + script, "settings")
 
@@ -3143,6 +3161,10 @@ function renderLikeState(s){
       '<div class="hint">'+escTxt(a.step||'')+' · 已检查 '+(a.checked||0)+' / '+
       (a.total||0)+' · 成功 '+(a.success||0)+' · 跳过 '+(a.skipped||0)+
       ' · 失败 '+(a.failed||0)+'</div>'+
+      '<div class="hint">速度档位：'+escTxt(a.tier_name||'')+
+      ' · 本次并发 '+(a.like_concurrency||0)+'</div>'+
+      (a.auto_pause_text?'<div class="hint" style="color:#E8930C;'+
+        'font-weight:700">自动暂停：'+escTxt(a.auto_pause_text)+'</div>':'')+
       ((a.invalid_skipped||0)>0?'<div class="hint">已跳过 '+
         (a.invalid_skipped||0)+' 个手动标记的失效吧</div>':'')+
       moduleFailures(a.failures)+

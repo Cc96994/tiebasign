@@ -27,6 +27,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import threading
 import time
 
@@ -45,6 +46,13 @@ _FETCH_CONCURRENCY = 12
 _LIKE_RETRIES = 2
 _RL_CODE = 3280004
 _RN = 30
+#: 0.6.5：撞限流后的自动暂停时长（分钟，用户可改），以及解析百度文案的规则。
+_LIMIT_PAUSE_DEFAULT = 5
+_LIMIT_PAUSE_MIN = 1
+_LIMIT_PAUSE_MAX = 60
+_LIMIT_RE = re.compile(
+    r"(\d+)\s*(秒|分钟|小时|min|mins|minute|minutes|sec|secs|second|seconds|"
+    r"hour|hours)", re.IGNORECASE)
 #: L1/L2：进程内累积，每 20 个「ok 状态变化」才整文件落盘一次，结束再落一次。
 _FLUSH_EVERY = 20
 _MIN_LIKE_RATE = 1.0
@@ -52,8 +60,7 @@ _MIN_LIKE_RATE = 1.0
 _LIKE_START_RATE = 6.0
 #: 0.6.4：点赞速率硬上限。四档显式速率 4/7/10/12，令牌桶 burst=1。
 _LIKE_RATE_CAP = 12.0
-#: L4：撞 3280004 后的全局冷却时间（秒）；0.6.4 拉长，避免连环撞。
-_RL_BACKOFF = (20.0, 45.0)
+#: L4：撞 3280004 后的自动暂停由 ``limit_pause_minutes`` 或百度文案决定。
 
 #: 分段耗时（P0-2）：拉列表 / 取帖 / 点赞前等待 / 点赞请求。
 PHASE_LIST = "list"
@@ -138,6 +145,50 @@ def _today():
 
 def _now_ms():
     return int(time.time() * 1000)
+
+
+def _clamp_pause_minutes(value):
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        minutes = _LIMIT_PAUSE_DEFAULT
+    return max(_LIMIT_PAUSE_MIN, min(_LIMIT_PAUSE_MAX, minutes))
+
+
+def _limit_pause_minutes(data):
+    return _clamp_pause_minutes(
+        data.get("limit_pause_minutes", _LIMIT_PAUSE_DEFAULT))
+
+
+def _fmt_duration(seconds):
+    seconds = int(seconds)
+    if seconds < 60:
+        return "{} 秒".format(seconds)
+    if seconds < 3600:
+        return "{:.0f} 分钟".format(seconds / 60.0)
+    return "{:.1f} 小时".format(seconds / 3600.0)
+
+
+def _limit_wait_seconds(err, default_minutes):
+    """优先读百度文案里的解除时间；读不到就用设置的分钟数。
+
+    返回 (等待秒数, 是否来自百度文案)。aiotieba 4.7.1 的
+    ``TiebaServerError`` 只有 code/msg，没有单独的 reset 时间字段，所以
+    「读文案」是方向 1，读不到就是方向 2。
+    """
+    message = str(getattr(err, "msg", None) or err or "")
+    match = _LIMIT_RE.search(message)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2).lower()
+        if unit.startswith("秒") or unit.startswith("sec"):
+            seconds = amount
+        elif unit.startswith("分钟") or unit.startswith("min"):
+            seconds = amount * 60
+        else:
+            seconds = amount * 3600
+        return max(1, min(seconds, 3600)), True
+    return max(60, _clamp_pause_minutes(default_minutes) * 60), False
 
 
 def _phase_add(sub, phase, started_ms):
@@ -240,6 +291,7 @@ def get_settings():
         "like_concurrency": tier.concurrency,
         "like_delay": list(tier.delay),
         "like_rate_per_sec": round(tiers.like_rate_per_sec(tier), 1),
+        "limit_pause_minutes": _limit_pause_minutes(data),
         "max_level": tiers.LIKE_TIER_COUNT - 1,
         "max_open_level": tiers.max_like_level(),
         "red_unlocked": True,
@@ -247,17 +299,21 @@ def get_settings():
 
 
 def save_settings(payload):
-    """保存点赞侧的速度档位（四档 0–3）。"""
+    """保存点赞侧设置：速度档位（四档 0–3）和限流自动暂停分钟数。"""
     if not isinstance(payload, dict):
         raise ValueError("设置格式不对")
-    try:
-        level = int(payload.get("level", tiers.LIKE_DEFAULT_LEVEL))
-    except (TypeError, ValueError):
-        level = tiers.LIKE_DEFAULT_LEVEL
-    if level < 0 or level > tiers.max_like_level():
-        raise ValueError("点赞档位只有四档（0–3）")
     data = _load()
-    data["level"] = level
+    if "level" in payload:
+        try:
+            level = int(payload.get("level"))
+        except (TypeError, ValueError):
+            level = tiers.LIKE_DEFAULT_LEVEL
+        if level < 0 or level > tiers.max_like_level():
+            raise ValueError("点赞档位只有四档（0–3）")
+        data["level"] = level
+    if "limit_pause_minutes" in payload:
+        data["limit_pause_minutes"] = _clamp_pause_minutes(
+            payload.get("limit_pause_minutes"))
     _save(data)
     return get_settings()
 
@@ -280,7 +336,11 @@ def _new_state(run_id, pairs):
             "phase_ms": {},
             "tier_level": None,
             "tier_name": None,
+            "like_concurrency": 0,
+            "like_rate": 0,
             "paused": False,
+            "auto_pause_until": 0,
+            "auto_pause_text": "",
             "invalid_skipped": 0,
             "failures": [],
             "error": None,
@@ -509,19 +569,29 @@ async def _fetch_forums(client, sub):
     return forums
 
 
-async def _agree_with_retry(client, tid, sem, limiter, cooldown, sub, delay):
-    """点赞；3280004（操作太频繁）退避后重试。
+async def _agree_with_retry(client, tid, sem, limiter, cooldown, flags, sub,
+                            delay, pause_minutes):
+    """点赞；3280004 时自动暂停，再按百度解除时间/设置时长后重试一次。
 
-    L4：退避等待放在信号量**外面**，并写进全局冷却窗 ``cooldown``：撞一次之后
+    L4：等待放在信号量**外面**，并写进全局冷却窗 ``cooldown``：撞一次之后
     所有任务都先等冷却过去，而不是每个任务各拿一个并发槽睡觉。
-    L6：每次撞限流都把令牌桶速率砍半（``limiter.slow_down``），避免连环撞。
+    L6：每次撞限流都把令牌桶速率砍半（``limiter.slow_down``）。
+    0.6.5：优先从百度文案里解析「X 分钟/秒/小时」作为解除时间；读不到就用
+    ``limit_pause_minutes``（默认 5 分钟）。等待结束后自动继续。
     """
     last_err = None
     for attempt in range(_LIKE_RETRIES + 1):
+        if flags.get("stop"):
+            return None, last_err
         await _wait_until_resumed()
         wait = cooldown["until"] - time.monotonic()
         if wait > 0:
             await asyncio.sleep(wait)
+            if time.monotonic() >= cooldown["until"]:
+                flags["auto_pause_until"] = 0
+                _update_account(
+                    sub["account_id"], auto_pause_until=0,
+                    auto_pause_text="", step="逐个吧点赞")
         await limiter.acquire()
         await sem.acquire()
         try:
@@ -543,14 +613,31 @@ async def _agree_with_retry(client, tid, sem, limiter, cooldown, sub, delay):
             sem.release()
         err = getattr(resp, "err", None)
         if err is None:
+            flags["auto_pause_until"] = 0
+            _update_account(sub["account_id"], auto_pause_until=0,
+                            auto_pause_text="")
             return resp, None
         last_err = err
         code = tieba_codes.parse_code(getattr(err, "code", None))
-        if code != _RL_CODE or attempt >= _LIKE_RETRIES:
+        if code != _RL_CODE:
             return resp, err
-        backoff = _RL_BACKOFF[0] if attempt == 0 else _RL_BACKOFF[1]
-        cooldown["until"] = time.monotonic() + backoff
+        wait_sec, parsed = _limit_wait_seconds(err, pause_minutes)
+        flags["auto_pause_until"] = time.monotonic() + wait_sec
+        cooldown["until"] = max(cooldown["until"], flags["auto_pause_until"])
         limiter.slow_down()
+        if parsed:
+            text = "百度提示 {} 后解除限制，自动暂停".format(
+                _fmt_duration(wait_sec))
+        else:
+            text = "百度没有给出解除时间，按设置暂停 {} 分钟".format(
+                _clamp_pause_minutes(pause_minutes))
+        _update_account(
+            sub["account_id"],
+            auto_pause_until=int(time.time() * 1000) + wait_sec * 1000,
+            auto_pause_text=text,
+            step="被限流，自动暂停中")
+        if attempt >= 1:
+            return resp, err
     return None, last_err
 
 
@@ -569,10 +656,12 @@ async def _like_account_async(account, bduss):
     like_rate = _starting_rate(tier, cfg)
     limiter = None
     flags = {"stop": False, "rate_limited": 0}
-    _update_account(aid, tier_level=tier.level, tier_name=tier.name)
+    _update_account(aid, tier_level=tier.level, tier_name=tier.name,
+                    like_concurrency=like_concurrency, like_rate=like_rate)
     run_started = _now_ms()
     store = _load()
     flush = {"changes": 0}
+    pause_minutes = _limit_pause_minutes(cfg)
 
     def _flush():
         try:
@@ -696,10 +785,28 @@ async def _like_account_async(account, bduss):
                 # 点赞接口对频率很敏感：首次请求前停一小段，限流退避见
                 # _agree_with_retry（冷却窗在信号量外面）。
                 resp, err = await _agree_with_retry(
-                    client, tid, like_sem, limiter, cooldown, sub,
-                    rng.uniform(*like_delay))
+                    client, tid, like_sem, limiter, cooldown, flags, sub,
+                    rng.uniform(*like_delay), pause_minutes)
+                if flags["stop"]:
+                    _bump(aid, "skipped")
+                    _bump(aid, "checked")
+                    return
                 if err is not None:
                     info = _describe(err)
+                    if info["code"] == _RL_CODE:
+                        # 自动暂停后仍被限流：结束本轮，不把后面的吧记成失败。
+                        flags["rate_limited"] = flags.get(
+                            "rate_limited", 0) + 1
+                        flags["limit_stop"] = True
+                        flags["stop"] = True
+                        _update_account(
+                            aid,
+                            step="仍被限流，已自动暂停并结束本轮；稍后可重新开始",
+                            auto_pause_until=0,
+                            auto_pause_text="仍被限流，本轮已停止；稍后可重新开始")
+                        _bump(aid, "skipped")
+                        _bump(aid, "checked")
+                        return
                     if info["category"] == tieba_codes.CAT_FORUM_BANNED:
                         _mark_invalid(fname)
                         _bump(aid, "skipped")
@@ -713,11 +820,6 @@ async def _like_account_async(account, bduss):
                     if info["category"] in (tieba_codes.CAT_ACCOUNT,
                                             tieba_codes.CAT_CAPTCHA):
                         flags["stop"] = True
-                    if info["code"] == _RL_CODE:
-                        flags["rate_limited"] = flags.get(
-                            "rate_limited", 0) + 1
-                        if flags["rate_limited"] >= 3:
-                            flags["stop"] = True
                     _bump(aid, "failed")
                     _bump(aid, "checked")
                     return
@@ -730,7 +832,12 @@ async def _like_account_async(account, bduss):
                 await asyncio.gather(*(one(f) for f in forums))
             finally:
                 _phase_add(sub, PHASE_LIKE, like_started)
-            _update_account(aid, status="done", step="随机点赞完成")
+            if flags.get("limit_stop"):
+                _update_account(
+                    aid, status="done",
+                    step="被限流，已自动暂停并结束本轮；稍后可重新开始")
+            else:
+                _update_account(aid, status="done", step="随机点赞完成")
     except Exception as exc:  # noqa: BLE001
         _update_account(aid, status="error", step="随机点赞异常",
                         error={"detail": "{}: {}".format(

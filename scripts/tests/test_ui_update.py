@@ -197,16 +197,25 @@ def page_content_checks():
           "/settings/groupsign" in main._page_settings())
     check("设置页有「签到速度档位」入口",
           "/settings/sign" in main._page_settings())
-    check("设置页有「失效贴吧」入口",
-          "/settings/invalid" in main._page_settings())
+    check("设置页有「标记失效贴吧」入口",
+          "/settings/invalid" in main._page_settings()
+          and "标记失效贴吧" in main._page_settings())
     check("签到页有暂停按钮",
           "sign_pause_btn" in main._JS_SIGN
           and "like_pause_btn" in main._JS_SIGN
           and "已暂停：不再发新的补签请求" in main._JS_SIGN)
     invalid_page = main._page_settings_invalid()
-    check("失效贴吧页可渲染且含添加控件",
+    check("标记失效贴吧页可渲染且含添加控件",
           "id='bad_forum_name'" in invalid_page
-          and "已标记" in invalid_page, invalid_page[:200])
+          and "已标记" in invalid_page
+          and "标记失效贴吧" in invalid_page, invalid_page[:200])
+    like_page = main._page_settings_like()
+    check("点赞设置页有被限流暂停分钟输入",
+          "id='lk_pause_minutes'" in like_page
+          and "被限流后自动暂停" in like_page)
+    check("点赞卡片显示速度档位/自动暂停",
+          "速度档位：" in main._JS_SIGN
+          and "自动暂停：" in main._JS_SIGN)
     sign_tier_page = main._page_settings_sign()
     check("签到速度页有滑块与折叠风险提示",
           "id='tier_sign'" in sign_tier_page
@@ -378,6 +387,11 @@ def http_checks():
               status == 200 and body["ok"] is True
               and body["settings"]["level"] == 3
               and body["settings"]["like_concurrency"] == 12, body)
+        status, body = post("/api/like/settings", {"limit_pause_minutes": 7})
+        check("点赞限流暂停分钟可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["limit_pause_minutes"] == 7, body)
+        post("/api/like/settings", {"limit_pause_minutes": 5})
         status, body = post("/api/like/settings", {"level": 4})
         check("点赞只有四档，level=4 被拒",
               status == 200 and body["ok"] is False, body)

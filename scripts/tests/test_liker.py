@@ -343,30 +343,33 @@ def test_fetch_and_like_concurrency():
 
 
 def test_rate_limit_cooldown():
-    """L4/L5/L6：3280004 退避不占槽位、全局冷却、令牌桶降速。"""
+    """L4/L5/L6 + 0.6.5：3280004 自动暂停、不占槽、令牌桶降速。"""
     async def scenario():
         client = FakeClient("bduss")
         FakeClient.agree_sequence = {7: [FakeErr(3280004, ""), None]}
         sem = asyncio.Semaphore(1)
         limiter = liker._RateLimiter(10.0, 5.0)
         cooldown = {"until": 0.0}
-        sub = {"phase_ms": {}}
-        old = liker._RL_BACKOFF
-        liker._RL_BACKOFF = (0.01, 0.01)
+        flags = {"stop": False}
+        sub = {"phase_ms": {}, "account_id": 1}
+        old = liker._limit_wait_seconds
+        liker._limit_wait_seconds = lambda err, minutes: (0.01, False)
         try:
             resp, err = await liker._agree_with_retry(
-                client, 7, sem, limiter, cooldown, sub, 0)
+                client, 7, sem, limiter, cooldown, flags, sub, 0, 5)
         finally:
-            liker._RL_BACKOFF = old
-        return resp, err, limiter, cooldown, sem
+            liker._limit_wait_seconds = old
+        return resp, err, limiter, cooldown, sem, flags
 
-    resp, err, limiter, cooldown, sem = asyncio.run(scenario())
-    check("L4：3280004 退避后重试成功", err is None and resp is not None, err)
+    resp, err, limiter, cooldown, sem, flags = asyncio.run(scenario())
+    check("L4：3280004 暂停后重试成功", err is None and resp is not None, err)
     check("L4：撞限流后写入全局冷却窗", cooldown["until"] > 0, cooldown)
     check("L6：撞限流后全局速率砍半", abs(limiter.rate - 5.0) < 1e-6,
           limiter.rate)
     check("L4：重试结束后信号量已释放", not sem.locked(), sem.locked())
     check("L5：令牌桶按速率放行（rate 可读）", limiter.rate > 0, limiter.rate)
+    check("0.6.5：重试成功后清掉自动暂停", flags.get("auto_pause_until") == 0,
+          flags)
 
     async def cooldown_slot():
         client = FakeClient("bduss")
@@ -374,22 +377,40 @@ def test_rate_limit_cooldown():
         sem = asyncio.Semaphore(1)
         limiter = liker._RateLimiter(10.0, 5.0)
         cooldown = {"until": 0.0}
-        sub = {"phase_ms": {}}
-        old = liker._RL_BACKOFF
-        liker._RL_BACKOFF = (0.2, 0.2)
+        flags = {"stop": False}
+        sub = {"phase_ms": {}, "account_id": 1}
+        old = liker._limit_wait_seconds
+        liker._limit_wait_seconds = lambda err, minutes: (0.2, False)
         try:
             task = asyncio.ensure_future(liker._agree_with_retry(
-                client, 7, sem, limiter, cooldown, sub, 0))
+                client, 7, sem, limiter, cooldown, flags, sub, 0, 5))
             await asyncio.sleep(0.05)   # 第一次请求已撞限流，正在冷却
             got = await asyncio.wait_for(sem.acquire(), timeout=0.05)
             sem.release()
             await task
         finally:
-            liker._RL_BACKOFF = old
+            liker._limit_wait_seconds = old
         return got
 
     check("L4：冷却等待不占点赞槽位",
           asyncio.run(cooldown_slot()) is True)
+
+
+def test_limit_pause_parse():
+    """0.6.5：优先读百度文案里的解除时间，读不到用设置。"""
+    check("解析 302 秒",
+          liker._limit_wait_seconds(
+              types.SimpleNamespace(msg="请302秒后再试"), 5) == (302, True))
+    check("解析 5 分钟",
+          liker._limit_wait_seconds(
+              types.SimpleNamespace(msg="请5分钟后再试"), 5) == (300, True))
+    check("解析 1 小时",
+          liker._limit_wait_seconds(
+              types.SimpleNamespace(msg="限制1小时后解除"), 5) == (3600, True))
+    check("读不到就按设置 3 分钟",
+          liker._limit_wait_seconds(
+              types.SimpleNamespace(msg="操作太频繁，请稍后再试"), 3)
+          == (180, False))
 
 
 def test_tier_settings():
@@ -413,6 +434,11 @@ def test_tier_settings():
         check("四档并发=12、红色",
               st["level"] == 3 and st["like_concurrency"] == 12
               and st["color"] == "red", st)
+        st = liker.save_settings({"limit_pause_minutes": 7})
+        check("限流暂停分钟可保存", st["limit_pause_minutes"] == 7, st)
+        st = liker.save_settings({"limit_pause_minutes": 0})
+        check("限流暂停分钟夹到 1", st["limit_pause_minutes"] == 1, st)
+        liker.save_settings({"limit_pause_minutes": 5})
         try:
             liker.save_settings({"level": 4})
             rejected = False
@@ -426,6 +452,24 @@ def test_tier_settings():
         check("手改 level=99 压回四档",
               st["stored_level"] == 3 and st["level"] == 3
               and st["name"] == "四档", st)
+        liker.save_settings({"level": 1})
+    finally:
+        tiers.get_like = _TEST_LIKE_GET
+
+
+def test_tier_applied_to_like():
+    """0.6.5：设置里的点赞档位真的传到本次运行状态/并发。"""
+    reset()
+    tiers.get_like = _REAL_LIKE_GET
+    try:
+        liker.save_settings({"level": 3})
+        forums = [types.SimpleNamespace(fname="t{}".format(i))
+                  for i in range(3)]
+        state = run_like(forums)
+        sub = state["accounts"][0]
+        check("四档应用到点赞状态",
+              sub["tier_level"] == 3 and sub["tier_name"] == "四档"
+              and sub["like_concurrency"] == 12, sub)
         liker.save_settings({"level": 1})
     finally:
         tiers.get_like = _TEST_LIKE_GET
@@ -526,7 +570,9 @@ def main():
     print("== 批量写盘 =="); test_batched_writes()
     print("== 取帖/点赞并发 =="); test_fetch_and_like_concurrency()
     print("== 限流退避 =="); test_rate_limit_cooldown()
+    print("== 限流暂停解析（0.6.5） =="); test_limit_pause_parse()
     print("== 档位设置 =="); test_tier_settings()
+    print("== 档位应用到点赞（0.6.5） =="); test_tier_applied_to_like()
     print("== 查封/失效吧（0.6.2） =="); test_banned_and_invalid_forums()
     print("== 点赞速率上限（0.6.3） =="); test_like_rate_cap()
     print("== 暂停标志（0.6.2） =="); test_pause_flag()
