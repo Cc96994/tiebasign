@@ -63,7 +63,9 @@ import threading
 import time
 import traceback
 
+import errors
 import redact
+import tieba_codes
 
 _DATA_FILENAME = "tiebasign_waterpost.json"
 _SCHEMA = 2                 # 2 = 每账号一组目标帖 + 秒级间隔 + 补发开关
@@ -105,13 +107,23 @@ _FLOOR_UNSUPPORTED = (
     "需要拿到新的可用接口并实测通过后才会开放。"
 )
 
-_NET_HINTS = (
-    "ClientConnector", "ClientOSError", "ClientConnection", "ConnectionError",
-    "TimeoutError", "Timeout", "SSLCertVerificationError", "SSLError",
-    "CertificationError", "SocketError", "Socket", "OSError",
-)
-# 遇到这些类别，当天对该账号停止发送（继续撞没有意义，且会加重风控）
+# 遇到这些类别，当天对该账号停止发送（继续撞没有意义，且会加重风控）。
+# 内容违规不在这里：单条文案被拒不代表账号被限制，换一条文案还能发。
 _HARD_STOP_CATEGORIES = ("需要验证码", "账号失效", "被限制/风控", "暂不支持")
+
+#: 水贴页面沿用的中文分类文案；分类逻辑本身在 errors.py，本文件不再维护
+#: 关键词表（0.6.0 P0-3：分类只能有一份实现）。
+_CATEGORY_LABELS = {
+    tieba_codes.CAT_CAPTCHA: "需要验证码",
+    tieba_codes.CAT_NETWORK: "网络异常",
+    tieba_codes.CAT_RISK: "被限制/风控",
+    tieba_codes.CAT_CONTENT: "内容违规",
+    tieba_codes.CAT_ACCOUNT: "账号失效",
+    tieba_codes.CAT_DONE: "已签到",
+    tieba_codes.CAT_NO_FORUM: "吧不存在",
+    tieba_codes.CAT_UNFOLLOWED: "未关注",
+    tieba_codes.CAT_UNKNOWN: "原因不明",
+}
 
 _TID_RE = re.compile(r"/p/(\d{5,20})")
 _PID_RE = re.compile(r"[?&#]pid=(\d{5,20})")
@@ -167,8 +179,8 @@ def _data_path():
 
 def _log(msg):
     try:
-        with open(os.path.join(os.getcwd(), "waterpost.log"), "a",
-                  encoding="utf-8") as fh:
+        with open(os.path.join(os.path.dirname(_data_path()), "waterpost.log"),
+                  "a", encoding="utf-8") as fh:
             fh.write("[{}] {}\n".format(
                 time.strftime("%m-%d %H:%M:%S"), redact.scrub(str(msg))))
             fh.flush()
@@ -758,35 +770,25 @@ def _bduss_for(account_id):
 
 
 def _classify(err):
-    """把 aiotieba 的错误对象/异常归类成界面上的中文类别。"""
-    code = getattr(err, "code", None)
-    msg = getattr(err, "msg", None)
-    if msg is None:
-        msg = str(err)
-    msg = str(msg or "")
-    low = msg.lower()
-    text = "{} {}".format(type(err).__name__, msg)
+    """把 aiotieba 的错误对象/异常归类成界面上的中文类别。
 
-    if "need verify code" in low or "验证码" in msg or "vcode" in low:
-        category = "需要验证码"
-    elif any(key in text for key in _NET_HINTS):
-        category = "网络异常"
-    elif any(key in msg for key in ("封禁", "禁言", "限制", "频繁", "太快",
-                                    "风控", "异常操作", "禁止")) and "禁止发布" not in msg:
-        category = "被限制/风控"
-    elif any(key in msg for key in ("敏感", "违规", "广告", "禁止发布",
-                                    "不合规", "含有")):
-        category = "内容违规"
-    elif any(key in msg for key in ("登录", "失效", "BDUSS", "用户不存在",
-                                    "未登录", "帐号")):
-        category = "账号失效"
-    else:
-        category = "风控其他"
-
-    detail = msg
-    if code is not None:
-        detail = "{}（错误码 {}）".format(msg, code)
-    return {"ok": False, "category": category, "code": code, "detail": detail}
+    分类规则统一在 ``errors``（0.6.0 P0-3）；这里只把标准分类换成水贴页一直
+    在用的那套中文文案，并把错误码附在 detail 里（水贴页面只显示 detail）。
+    """
+    info = errors.classify(err, subject="这次回复")
+    category = _CATEGORY_LABELS.get(info["category"], info["category"])
+    detail = info["detail"]
+    if info["code"] is not None:
+        detail = "{}（错误码 {}）".format(detail, info["code"])
+    return {
+        "ok": False,
+        "category": category,
+        "code": info["code"],
+        "reason": info["reason"],
+        "advice": info["advice"],
+        "detail": detail,
+        "raw": info["raw"],
+    }
 
 
 async def _resolve_async(bduss, tid):
@@ -988,7 +990,11 @@ def _store_result(data, account_id, target, content, result, source="auto"):
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "ok": bool(result.get("ok")),
         "category": result.get("category"),
+        "code": result.get("code"),
+        "reason": result.get("reason"),
+        "advice": result.get("advice"),
         "detail": result.get("detail") or "",
+        "raw": redact.scrub(result.get("raw") or ""),
         "content": content[:60],
         "fname": target.get("fname", ""),
         "title": target.get("title", ""),
@@ -1007,7 +1013,7 @@ def _notify_failure(target, content, result):
             "贴吧签到助手 自动水贴失败",
             "《{}》回复失败：{} - {}".format(
                 target.get("title") or target.get("fname") or "主题帖",
-                result.get("category") or "风控其他",
+                result.get("category") or "原因不明",
                 (result.get("detail") or "")[:160]))
     except Exception as exc:  # noqa: BLE001
         _log("notify failed: {}: {}".format(type(exc).__name__, exc))
@@ -1143,8 +1149,8 @@ def _tick():
             _log("posted account={} target={} tid={} content_len={}".format(
                 aid, target["id"], target["tid"], len(content)))
         else:
-            _log("post failed account={} target={} category={}".format(
-                aid, target["id"], category))
+            _log("post failed account={} target={} category={} code={}".format(
+                aid, target["id"], category, result.get("code")))
             _notify_failure(target, content, result)
             if category in _HARD_STOP_CATEGORIES:
                 halted.add(aid)
@@ -1195,6 +1201,7 @@ def send_test(account_id=None, target_id=None):
         "ok": bool(result.get("ok")),
         "content": content,
         "category": result.get("category"),
+        "code": result.get("code"),
         "detail": result.get("detail") or "",
     }
     _store_result(data, aid, target, content, result, source="test")
@@ -1258,6 +1265,7 @@ def _manual_note(item, target, content, result):
             "content": content or "",
             "ok": bool(result.get("ok")),
             "category": category,
+            "code": result.get("code"),
             "detail": (result.get("detail") or "")[:200],
             "seq": item.get("seq"),
             "of": item.get("of"),

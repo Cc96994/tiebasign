@@ -135,6 +135,8 @@ def page_content_checks():
     check("自动签到页引导到模块自己的设置页",
           "/settings/groupsign" in auto_html and
           "/settings/like" in auto_html)
+    check("自动签到页有失败重试分钟输入",
+          "id='retry_minutes'" in auto_html and "自动重试" in auto_html)
 
     set_state(phase="available", dot=True,
               latest={"version": "0.5.7", "version_code": 1023507})
@@ -166,6 +168,9 @@ def page_content_checks():
     check("签到报告页说明已脱敏", "BDUSS" in report_html and "掩码" in report_html)
     check("签到页 JS 展示成长等级签到", "成长等级签到" in main._JS_SIGN)
     check("签到页 JS 展示错误码", "错误码" in main._JS_SIGN)
+    check("签到页 JS 展示已签到数（不计失败）", "已签到" in main._JS_SIGN)
+    check("签到页 JS 区分 msign 跳过文案",
+          "没成功，已改为逐个吧补签" in main._JS_SIGN)
     check("签到页 JS 用「原因」和「怎么办」说人话",
           "原因：" in main._JS_SIGN and "怎么办：" in main._JS_SIGN)
     check("签到页 JS 有提醒区（warnings）", "warningsCard" in main._JS_SIGN)
@@ -190,6 +195,51 @@ def page_content_checks():
           "id='gs_btn'" in sign_html2 and "开始吧群签到" in sign_html2)
     check("设置页有「吧群签到设置」入口",
           "/settings/groupsign" in main._page_settings())
+    check("设置页没有独立的签到速度入口（已移入自动签到）",
+          "/settings/sign" not in main._page_settings())
+    check("设置页有「标记失效贴吧」入口",
+          "/settings/invalid" in main._page_settings()
+          and "标记失效贴吧" in main._page_settings())
+    check("签到页有暂停按钮",
+          "sign_pause_btn" in main._JS_SIGN
+          and "like_pause_btn" in main._JS_SIGN
+          and "已暂停：不再发新的补签请求" in main._JS_SIGN)
+    invalid_page = main._page_settings_invalid()
+    check("标记失效贴吧页可渲染且含添加控件",
+          "id='bad_forum_name'" in invalid_page
+          and "已标记" in invalid_page
+          and "标记失效贴吧" in invalid_page, invalid_page[:200])
+    like_page = main._page_settings_like()
+    check("点赞设置页有缓存/休息控件",
+          "id='lk_cache'" in like_page and "id='lk_rest'" in like_page
+          and "id='lk_cache_now'" in like_page)
+    check("点赞设置页有被限流暂停分钟输入",
+          "id='lk_pause_minutes'" in like_page
+          and "被限流后自动暂停" in like_page)
+    check("点赞卡片显示速度档位/自动暂停",
+          "速度档位：" in main._JS_SIGN
+          and "自动暂停：" in main._JS_SIGN)
+    auto_page = main._page_settings_auto()
+    check("自动签到页有签到速度滑块与折叠风险提示",
+          "id='tier_sign'" in auto_page
+          and "type='range'" in auto_page
+          and "<details" in auto_page
+          and "风险提示" in auto_page)
+    check("自动签到页有红档二次确认对话框",
+          "id='tier_confirm_sign'" in auto_page
+          and "确定使用" in auto_page
+          and "tier_cancel_sign" in auto_page)
+    like_tier_page = main._page_settings_like()
+    check("随机点赞设置页有速度滑块",
+          "id='tier_like'" in like_tier_page
+          and "type='range'" in like_tier_page
+          and "max='3'" in like_tier_page)
+    check("点赞四档：一/二/三/四档",
+          all(k in like_tier_page for k in ("一档", "二档", "三档", "四档")))
+    check("档位滑块有绿/黄/红颜色 class",
+          all(k in main._CSS for k in
+              (".tier-slider.blue", ".tier-slider.amber",
+               ".tier-slider.red", ".tier-slider.like-track")))
     gs_html = main._page_settings_groupsign()
     check("吧群签到页能渲染",
           "吧群签到设置" in gs_html and "添加群" in gs_html, gs_html[:200])
@@ -314,6 +364,93 @@ def http_checks():
               status == 200 and "随机点赞设置" in like_page
               and all(k in like_page for k in
                       ("lk_auto", "lk_auto_mode", "lk_auto_time")))
+        check("随机点赞设置页有分批间隔输入框",
+              status == 200 and "id='lk_batch'" in like_page
+              and "每批之间等待" in like_page)
+        check("随机点赞设置页有速度档位滑块",
+              status == 200 and "id='tier_like'" in like_page
+              and "type='range'" in like_page
+              and "风险提示" in like_page)
+        status, sign_page = get("/settings/auto")
+        check("GET /settings/auto 200 且有签到速度滑块",
+              status == 200 and "id='tier_sign'" in sign_page
+              and "type='range'" in sign_page and "<details" in sign_page)
+        status, body = post("/api/sign/settings", {"level": 2})
+        check("签到档位可保存到激进",
+              status == 200 and body["ok"] is True
+              and body["settings"]["level"] == 2, body)
+        status, body = post("/api/sign/settings", {"level": 5})
+        check("签到红档已解锁、可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["level"] == 5
+              and body["settings"]["sign_concurrency"] == 16, body)
+        status, body = post("/api/like/settings", {"level": 0})
+        check("点赞档位可保存到保守",
+              status == 200 and body["ok"] is True
+              and body["settings"]["level"] == 0, body)
+        status, body = post("/api/like/settings", {"level": 3})
+        check("点赞四档可保存（并发 12）",
+              status == 200 and body["ok"] is True
+              and body["settings"]["level"] == 3
+              and body["settings"]["like_concurrency"] == 12, body)
+        status, body = post("/api/like/settings", {"limit_pause_minutes": 7})
+        check("点赞限流暂停分钟可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["limit_pause_minutes"] == 7, body)
+        status, body = post("/api/like/settings", {
+            "cache_enabled": False, "rest_minutes": 3,
+            "batch_interval_seconds": 15})
+        check("帖子缓存/休息/批间间隔设置可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["cache_enabled"] is False
+              and body["settings"]["rest_minutes"] == 3
+              and body["settings"]["batch_interval_seconds"] == 15, body)
+        status, body = post("/api/like/settings",
+                            {"batch_interval_seconds": 999})
+        check("批间间隔夹到 120",
+              status == 200 and body["ok"] is True
+              and body["settings"]["batch_interval_seconds"] == 120, body)
+        status, raw = get("/api/like/cache/state")
+        check("缓存状态可读取",
+              status == 200 and json.loads(raw)["state"]["status"] == "idle")
+        post("/api/like/settings", {"limit_pause_minutes": 5,
+                                    "cache_enabled": True,
+                                    "rest_minutes": 2,
+                                    "batch_interval_seconds": 10})
+        status, body = post("/api/like/settings", {"level": 4})
+        check("点赞只有四档，level=4 被拒",
+              status == 200 and body["ok"] is False, body)
+        post("/api/sign/settings", {"level": 1})
+        post("/api/like/settings", {"level": 1})
+        status, invalid_page = get("/settings/invalid")
+        check("GET /settings/invalid 200",
+              status == 200 and "id='bad_forum_name'" in invalid_page)
+        status, body = post("/api/invalid", {
+            "action": "add", "name": "测试失效吧"})
+        check("失效贴吧可添加",
+              status == 200 and body["ok"] is True
+              and "测试失效吧" in body["forums"], body)
+        status, raw = get("/api/invalid")
+        check("失效贴吧可读取",
+              status == 200 and "测试失效吧" in json.loads(raw)["forums"])
+        status, body = post("/api/invalid", {
+            "action": "remove", "name": "测试失效吧"})
+        check("失效贴吧可删除",
+              status == 200 and "测试失效吧" not in body["forums"], body)
+        status, body = post("/api/sign/pause", {"paused": True})
+        check("签到暂停接口",
+              status == 200 and body["ok"] is True
+              and body["paused"] is True, body)
+        check("签到暂停标志真的生效", main.signer.is_paused() is True)
+        post("/api/sign/pause", {"paused": False})
+        check("签到继续后标志清除", main.signer.is_paused() is False)
+        status, body = post("/api/like/pause", {"paused": True})
+        check("点赞暂停接口",
+              status == 200 and body["ok"] is True
+              and body["paused"] is True, body)
+        check("点赞暂停标志真的生效", main.liker.is_paused() is True)
+        post("/api/like/pause", {"paused": False})
+        check("点赞继续后标志清除", main.liker.is_paused() is False)
         status, body = get("/api/update/state")
         state = json.loads(body)["state"]
         check("GET /api/update/state 200",
@@ -326,6 +463,7 @@ def http_checks():
         status, body = post("/api/auto/settings", {
             "enabled": True, "global_time": "08:00",
             "notify_system": True, "notify_dot": True,
+            "retry_minutes": 7,
             "auto_groupsign": False, "groupsign_time": "09:30",
             "auto_like": True, "like_time": "", "accounts": {},
         })
@@ -334,6 +472,8 @@ def http_checks():
               and body["settings"]["auto_groupsign"] is False
               and body["settings"]["groupsign_time"] == "09:30"
               and body["settings"]["auto_like"] is True, body)
+        check("失败重试分钟可保存",
+              body["settings"]["retry_minutes"] == 7, body)
         status, body = post("/api/update/settings", {"auto_check": False})
         check("POST 设置成功", status == 200 and body["ok"] is True)
         check("设置真的生效了", updater.get_settings()["auto_check"] is False)

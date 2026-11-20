@@ -66,14 +66,16 @@ def test_codes():
           "太快" in (tieba_codes.reason(340011) or ""))
     check("3280004 原因=操作太频繁",
           "频繁" in (tieba_codes.reason(3280004) or ""))
-    check("340001 分类=被限制",
-          tieba_codes.category_for_code(340001) == tieba_codes.CAT_RISK)
-    check("340001 原因=吧暂时被关闭",
+    check("340001 分类=吧已查封",
+          tieba_codes.category_for_code(340001) ==
+          tieba_codes.CAT_FORUM_BANNED)
+    check("340001 原因=吧被关闭",
           "关闭" in (tieba_codes.reason(340001) or ""))
-    check("340001 建议=换一个吧",
-          "换一个吧" in (tieba_codes.advice(340001) or ""))
-    check("340006 分类=风控限制",
-          tieba_codes.category_for_code(340006) == tieba_codes.CAT_RISK)
+    check("340001 建议=标记失效",
+          "失效贴吧" in (tieba_codes.advice(340001) or ""))
+    check("340006 分类=吧已查封",
+          tieba_codes.category_for_code(340006) ==
+          tieba_codes.CAT_FORUM_BANNED)
     check("110000 分类=账号失效",
           tieba_codes.category_for_code(110000) == tieba_codes.CAT_ACCOUNT)
     check("300004 分类=未关注",
@@ -140,9 +142,9 @@ class FakeForum:
 
 
 class FakeFollow:
-    def __init__(self, forums):
+    def __init__(self, forums, has_more=False):
         self._forums = forums
-        self.has_more = False
+        self.has_more = has_more
 
     def __iter__(self):
         return iter(self._forums)
@@ -173,6 +175,7 @@ class FakeClient:
     def __init__(self, bduss):
         self.bduss = bduss
         self.forums = []
+        self.follow_pages = None
         self.msign_err = None
         self.growth_err = None
         self.forum_behavior = {}
@@ -182,6 +185,7 @@ class FakeClient:
         self.max_active = 0
         self.calls = []
         self.growth_calls = 0
+        self.require = None
         FakeClient.instances.append(self)
 
     async def __aenter__(self):
@@ -190,7 +194,8 @@ class FakeClient:
     async def __aexit__(self, *exc):
         return False
 
-    async def get_self_info(self):
+    async def get_self_info(self, require=None):
+        self.require = require
         return FakeUser()
 
     async def sign_growth(self):
@@ -216,6 +221,9 @@ class FakeClient:
         return FakeResp(self.msign_err)
 
     async def get_self_follow_forums(self, pn=1, rn=200):
+        self.calls.append(("get_self_follow_forums", pn))
+        if self.follow_pages is not None:
+            return self.follow_pages.get(pn, FakeFollow([]))
         return FakeFollow(self.forums)
 
     async def sign_forum(self, fname):
@@ -238,6 +246,8 @@ def install_fake_aiotieba():
     import types
     mod = types.ModuleType("aiotieba")
     mod.Client = FakeClient
+    # signer 用 ReqUInfo.BASIC 省掉 profile 请求；测试只关心传了 BASIC。
+    mod.ReqUInfo = types.SimpleNamespace(BASIC=1, ALL=2)
     sys.modules["aiotieba"] = mod
 
 
@@ -255,7 +265,8 @@ def reset_files():
             os.remove(path)
 
 
-async def run_sign(forums, behavior=None, msign_err=None, growth_err=None):
+async def run_sign(forums, behavior=None, msign_err=None, growth_err=None,
+                   follow_pages=None):
     client = None
     real_client_cls = FakeClient
 
@@ -263,6 +274,7 @@ async def run_sign(forums, behavior=None, msign_err=None, growth_err=None):
         def __init__(self, bduss):
             super().__init__(bduss)
             self.forums = forums
+            self.follow_pages = follow_pages
             self.forum_behavior = behavior or {}
             self.msign_err = msign_err
             self.growth_err = growth_err
@@ -272,10 +284,10 @@ async def run_sign(forums, behavior=None, msign_err=None, growth_err=None):
     import types
     mod = types.ModuleType("aiotieba")
     mod.Client = TrackingClient
+    mod.ReqUInfo = types.SimpleNamespace(BASIC=1, ALL=2)
     sys.modules["aiotieba"] = mod
 
     state = make_state()
-    signer.SIGN_CONCURRENCY = 4
     signer.SIGN_JITTER = (0, 0)
     await signer._sign_async(state, FAKE_BDUSS)
     signer._persist_report(state)
@@ -286,23 +298,32 @@ def test_signer_flow():
     reset_files()
     forums = [FakeForum("吧A"), FakeForum("吧B"), FakeForum("吧C", True),
               FakeForum("bad-forum"), FakeForum("risk-forum"),
-              FakeForum("未知吧")]
+              FakeForum("未知吧"), FakeForum("already-forum")]
     behavior = {
         "bad-forum": RuntimeError("server said BDUSS=" + FAKE_BDUSS),
         "risk-forum": FakeErr(340011, ""),
         "未知吧": FakeErr(999999, ""),
+        "already-forum": FakeErr(160002, ""),
     }
     state, client = asyncio.run(run_sign(forums, behavior))
 
     check("流程状态=done", state["status"] == "done", state["status"])
-    check("待签数=5（已签的吧被跳过）",
-          state["forum_total"] == 5, state["forum_total"])
+    check("待签数=6（已签的吧被跳过）",
+          state["forum_total"] == 6, state["forum_total"])
     check("成功=2", state["forum_success"] == 2, state["forum_success"])
+    check("服务端说已签到=1（不计失败）",
+          state["forum_done"] == 1, state.get("forum_done"))
     check("失败=3", state["forum_failed"] == 3, state["forum_failed"])
+    check("已签到不算失败（失败列表里没有它）",
+          all(f["forum"] != "already-forum" for f in state["failures"]),
+          [f["forum"] for f in state["failures"]])
+    check("登录只取 BASIC（S1）",
+          client.require == sys.modules["aiotieba"].ReqUInfo.BASIC,
+          client.require)
     check("并发生效（>=2）", client.max_active >= 2, client.max_active)
     check("并发不超限（<=4）", client.max_active <= 4, client.max_active)
     check("每个未签吧只请求一次",
-          sum(1 for c in client.calls if c[0] == "sign_forum") == 5,
+          sum(1 for c in client.calls if c[0] == "sign_forum") == 6,
           client.calls)
 
     by_forum = {f["forum"]: f for f in state["failures"]}
@@ -342,36 +363,85 @@ def test_signer_flow():
     text = signer.report_text()
     check("报告文本含错误码 340011", "错误码 340011" in text)
     check("报告文本含中文原因", "操作太快" in text)
+    check("报告文本含已签到数（不计失败）",
+          "已签到 1" in text and "不计失败" in text, text)
     check("报告文本含 BDUSS 掩码", state["account_mask"] in text)
     check("报告文本不含完整 BDUSS", FAKE_BDUSS not in text)
     check("报告文本说明不含完整 BDUSS", "不含完整 BDUSS" in text)
+
+    # ---- 0.6.0 P0-2：phase_ms 分段耗时 --------------------------------
+    phases = state.get("phase_ms") or {}
+    check("phase_ms 覆盖登录/msign/列表/补签",
+          all(k in phases for k in ("login", "msign", "list", "sign")),
+          phases)
+    check("phase_ms 都是非负整数",
+          all(isinstance(v, int) and v >= 0 for v in phases.values()),
+          phases)
+    check("phase_ms 记录签到请求耗时", "sign_request" in phases, phases)
+    report_obj = json.loads(report_json) if report_json else {}
+    check("最近报告包含 phase_ms",
+          isinstance(report_obj.get("phase_ms"), dict)
+          and bool(report_obj["phase_ms"]), report_obj.get("phase_ms"))
+    check("报告文本有分段耗时", "分段耗时" in text and "登录" in text, text)
+    check("sign.log 记录 phase_ms", "phase_ms=" in log_text)
+    line = signer._fmt_phase_ms({"login": 1200, "msign": 3000, "list": 400,
+                                 "sign": 9000, "sign_request": 8000,
+                                 "sign_sleep": 900})
+    check("分段耗时格式化",
+          isinstance(line, list) and len(line) == 2
+          and "登录 1.2 秒" in line[0] and "补签明细" in line[1], line)
 
 
 def test_msign_warning():
     reset_files()
     forums = [FakeForum("吧A"), FakeForum("吧B")]
+    # 未知错误必须继续逐吧兜底：msign 失败本身不改变整体结果。
     state, _client = asyncio.run(run_sign(
-        forums, msign_err=FakeErr(340011, "")))
-    check("msign 失败不改变整体 done", state["status"] == "done")
-    check("msign 失败不计 forum_failed", state["forum_failed"] == 0)
-    check("msign 失败进 warnings", len(state["warnings"]) == 1)
+        forums, msign_err=FakeErr(999999, "")))
+    check("msign 未知错误不改变整体 done", state["status"] == "done")
+    check("msign 未知错误不计 forum_failed", state["forum_failed"] == 0)
+    check("msign 未知错误进 warnings", len(state["warnings"]) == 1)
     warn = state["warnings"][0]
-    check("warning 带 code", warn["code"] == 340011)
-    check("warning 带 cause", "太快" in (warn["reason"] or ""))
+    check("warning 带 code", warn["code"] == 999999)
+    check("msign 未知错误继续逐吧补签",
+          state["forum_success"] == 2, state["forum_success"])
     check("msign 状态为 error", state["msign"]["status"] == "error")
     check("msign 详情非空", bool(state["msign"]["detail"]))
+
+
+def test_msign_skip_and_continue():
+    """用户 0.6.1 反馈：msign 失败只跳过，继续逐吧补签，不弹报告。"""
+    for code in (340011, 4, 999999):
+        reset_files()
+        forums = [FakeForum("吧A"), FakeForum("吧B")]
+        state, client = asyncio.run(run_sign(
+            forums, msign_err=FakeErr(code, "")))
+        check("msign 失败不中断（code={}）".format(code),
+              state["status"] == "done", state["status"])
+        check("msign 失败继续逐吧补签（code={}）".format(code),
+              sum(1 for c in client.calls if c[0] == "sign_forum") == 2,
+              client.calls)
+        check("msign 失败不进 error（code={}）".format(code),
+              state.get("error") is None, state.get("error"))
+        check("msign 失败只进一条 warning（code={}）".format(code),
+              len(state["warnings"]) == 1, state.get("warnings"))
+        check("msign warning 带真实 code（code={}）".format(code),
+              state["warnings"][0]["code"] == code, state["warnings"])
+        check("msign 警告不算失败（code={}）".format(code),
+              state["forum_failed"] == 0, state["forum_failed"])
 
 
 def test_account_gate_failure():
     reset_files()
 
     class BadUserClient(FakeClient):
-        async def get_self_info(self):
+        async def get_self_info(self, require=None):
             return FakeUser(FakeErr(110000, ""))
 
     import types
     mod = types.ModuleType("aiotieba")
     mod.Client = BadUserClient
+    mod.ReqUInfo = types.SimpleNamespace(BASIC=1, ALL=2)
     sys.modules["aiotieba"] = mod
 
     state = make_state()
@@ -388,6 +458,145 @@ def test_network_error_category():
     exc = TimeoutError("timed out")
     check("超时分类=网络异常",
           signer._classify_exception(exc) == tieba_codes.CAT_NETWORK)
+
+
+def test_follow_pages_prefetch():
+    """S4：第一页之后并行预取；最后一页之后的空页不能混进签到列表。"""
+    reset_files()
+    pages = {
+        1: FakeFollow([FakeForum("p1-a"), FakeForum("p1-b")], has_more=True),
+        2: FakeFollow([FakeForum("p2-a")], has_more=True),
+        3: FakeFollow([FakeForum("p3-a")], has_more=False),
+    }
+    state, client = asyncio.run(run_sign([], follow_pages=pages))
+    check("多页关注列表全部取到", state["forum_total"] == 4,
+          state["forum_total"])
+    check("页 1/2/3 都请求到了",
+          {c[1] for c in client.calls
+           if c[0] == "get_self_follow_forums"} >= {1, 2, 3},
+          client.calls)
+    check("请求没有越过分页上限", all(
+        c[1] <= signer.MAX_FORUM_PAGES for c in client.calls
+        if c[0] == "get_self_follow_forums"), client.calls)
+    check("最后一页之后的空页没有进入补签",
+          all(f["forum"] in ("p1-a", "p1-b", "p2-a", "p3-a")
+              or f["forum"] == "" for f in state["failures"]), state["failures"])
+    check("每个取到的吧各补签一次",
+          sum(1 for c in client.calls if c[0] == "sign_forum") == 4,
+          client.calls)
+
+    # 第 2 页报错：整体报错，不能拿着半截列表去签
+    reset_files()
+    bad_page = FakeFollow([])
+    bad_page.err = FakeErr(2280007, "")
+    bad_pages = {
+        1: FakeFollow([FakeForum("p1-a")], has_more=True),
+        2: bad_page,
+    }
+    state2, client2 = asyncio.run(run_sign([], follow_pages=bad_pages))
+    check("翻页失败 -> 整体 error", state2["status"] == "error",
+          state2["status"])
+    check("翻页失败 -> 没有任何补签请求",
+          not any(c[0] == "sign_forum" for c in client2.calls),
+          client2.calls)
+
+
+def test_hard_stop_and_breaker():
+    """M3b：验证码/登录问题硬停；限流熔断降档后继续。"""
+    # 验证码 -> 硬停，剩余不签
+    reset_files()
+    forums = [FakeForum("cap")] + [FakeForum("ok{}".format(i))
+                                   for i in range(11)]
+    behavior = {"cap": FakeErr(4, "")}
+    state, client = asyncio.run(run_sign(forums, behavior))
+    check("验证码 -> 整体 error", state["status"] == "error",
+          state["status"])
+    check("验证码 -> hard_stopped 有记录",
+          bool(state.get("hard_stopped")), state.get("hard_stopped"))
+    check("验证码 -> 跳过了一些吧", state["forum_skipped"] > 0,
+          state["forum_skipped"])
+    check("验证码 -> 实际请求少于总数",
+          sum(1 for c in client.calls if c[0] == "sign_forum") < 12,
+          client.calls)
+    check("验证码 -> 错误文案说明停止",
+          "停止剩余补签" in (state["error"]["detail"] or ""), state["error"])
+
+    # 限流 -> 熔断降到保守档，继续跑完剩下的吧
+    reset_files()
+    forums = [FakeForum("rl")] + [FakeForum("ok{}".format(i))
+                                  for i in range(11)]
+    behavior = {"rl": FakeErr(340011, "")}
+    state2, _client2 = asyncio.run(run_sign(forums, behavior))
+    check("限流 -> 不判整体失败", state2["status"] == "done",
+          state2["status"])
+    check("限流 -> 记录熔断降档", bool(state2.get("breaker")),
+          state2.get("breaker"))
+    check("限流 -> 熔断目标档=保守",
+          state2["breaker"]["to_level"] == 0, state2["breaker"])
+    check("限流 -> 其余 11 个吧继续完成",
+          state2["forum_checked"] == 12 and state2["forum_success"] == 11,
+          (state2["forum_checked"], state2["forum_success"]))
+    check("限流 -> 用户档位不变", signer.get_settings()["level"] == 1)
+    check("限流 -> 报告写明自动降速",
+          "已自动降到「保守」档" in signer.report_text())
+
+    # 保守档仍被限流 -> 硬停
+    signer.save_settings({"level": 0})
+    reset_files()
+    forums = [FakeForum("rl")] + [FakeForum("ok{}".format(i))
+                                  for i in range(7)]
+    state3, _client3 = asyncio.run(run_sign(
+        forums, {"rl": FakeErr(340011, "")}))
+    check("保守档仍限流 -> 硬停 error", state3["status"] == "error",
+          state3["status"])
+    check("保守档仍限流 -> 说明原因",
+          "保守档仍然被限流" in (state3["error"]["detail"] or ""),
+          state3.get("error"))
+    signer.save_settings({"level": 1})
+
+
+def test_multi_accounts_parallel():
+    """S8：多账号并行，闸门最多 2 个账号同时跑。"""
+    import time as _time
+
+    reset_files()
+    signer._state = None
+    active = [0]
+    peak = [0]
+
+    async def fake_sign(state, bduss):
+        active[0] += 1
+        peak[0] = max(peak[0], active[0])
+        try:
+            await asyncio.sleep(0.05)
+            state.update(status="done", step="签到完成",
+                         finished_at=signer._now_ms())
+        finally:
+            active[0] -= 1
+
+    old = signer._sign_async
+    signer._sign_async = fake_sign
+    try:
+        pairs = [({"id": i, "name": "账号{}".format(i),
+                   "mask": "mask{}".format(i)}, "bduss-{}".format(i))
+                 for i in (1, 2, 3)]
+        run_id, err = signer.start_multi(pairs)
+        check("多账号任务启动成功", bool(run_id) and err is None, err)
+        deadline = _time.time() + 5
+        state = signer.get_state()
+        while _time.time() < deadline and state.get("status") != "done":
+            _time.sleep(0.01)
+            state = signer.get_state()
+        check("多账号任务跑完", state.get("status") == "done", state)
+        check("账号并行闸门=2（不超）", peak[0] == 2, peak[0])
+        check("3 个账号都完成", state.get("account_done") == 3,
+              state.get("account_done"))
+        check("每个账号状态都是 done",
+              all(a["status"] == "done" for a in state["accounts"]),
+              [a["status"] for a in state["accounts"]])
+    finally:
+        signer._sign_async = old
+        signer._state = None
 
 
 def test_growth_step():
@@ -409,6 +618,59 @@ def test_growth_step():
 
     state3, _client3 = asyncio.run(run_sign(forums))
     check("成长签到成功 -> success", state3["growth"]["status"] == "success")
+
+
+def test_autosign_retry():
+    """用户反馈：失败后按 retry_minutes 自动重试（默认 5 分钟，最多 3 次）。"""
+    import autosign
+    import time as _time
+
+    reset_files()
+    check("自动重试默认 5 分钟",
+          autosign.get_settings()["retry_minutes"] == 5)
+    check("重试间隔夹到 1",
+          autosign.save_settings({"retry_minutes": 0})["retry_minutes"] == 1)
+    check("重试间隔夹到 120",
+          autosign.save_settings({"retry_minutes": 999})["retry_minutes"] == 120)
+    autosign.save_settings({"retry_minutes": 5})
+
+    data = autosign._load()
+    data["retries"] = {}
+    autosign._save(data)
+    count = autosign._schedule_retry(data, 1, "2026-11-18")
+    check("排第一次重试",
+          count == 1 and data["retries"]["1"]["count"] == 1,
+          data.get("retries"))
+    check("未到点不重试",
+          autosign._retry_due(data, 1, "2026-11-18", now_ts=0) is False)
+    check("到点重试",
+          autosign._retry_due(
+              data, 1, "2026-11-18",
+              now_ts=data["retries"]["1"]["next_ts"] + 1) is True)
+    check("隔天不重试",
+          autosign._retry_due(data, 1, "2026-11-19",
+                              now_ts=_time.time() + 1) is False)
+    autosign._clear_retry(data, 1)
+    check("成功后清掉重试", not data.get("retries"))
+
+    # 通知只在最后一次尝试：重试期间不弹通知/不亮红点
+    notified = []
+    old_notify = autosign.notify_fail
+    autosign.notify_fail = lambda *a: notified.append(a)
+    try:
+        account = {"id": 1, "name": "测试账号", "mask": "AbCd****TEST"}
+        state = {"status": "done", "forum_failed": 1, "forum_success": 0,
+                 "msign": {"status": "success"}, "warnings": [],
+                 "failures": [{"forum": "坏吧", "detail": "失败"}],
+                 "account_id": 1}
+        snap = autosign._finalize(account, state, notify=False)
+        check("重试期间不弹通知", notified == [], notified)
+        check("重试期间不亮红点", snap["dot_pending"] is False)
+        snap2 = autosign._finalize(account, state, notify=True)
+        check("最后失败才弹通知", len(notified) == 1, notified)
+        check("最后失败才亮红点", snap2["dot_pending"] is True)
+    finally:
+        autosign.notify_fail = old_notify
 
 
 def test_auto_modules():
@@ -460,6 +722,9 @@ def test_autosign_warning_not_failure():
     import autosign
 
     reset_files()
+    autosign._log("selftest log path")
+    check("autosign.log 落在 ANDROID_PRIVATE",
+          os.path.exists(os.path.join(_PRIVATE, "autosign.log")))
     notified = []
     autosign.notify_fail = lambda *a: notified.append(a)
     account = {"id": 1, "name": "测试账号", "mask": "AbCd****TEST"}
@@ -504,16 +769,184 @@ def test_autosign_warning_not_failure():
     check("自动签到：通知带中文原因", "该吧不存在" in text, text)
 
 
+def test_invalid_module():
+    """0.6.2：失效贴吧模块的去重/过滤/删除。"""
+    import invalid
+
+    reset_files()
+    invalid.add_forum("  A吧  ")
+    invalid.add_forum("A吧")
+    check("失效吧会去重和去空白", invalid.list_forums() == ["A吧"],
+          invalid.list_forums())
+    check("失效吧命中", invalid.is_invalid("A吧") is True)
+    kept, skipped = invalid.filter_forums(["A吧", "B吧"])
+    check("过滤失效吧", kept == ["B吧"] and skipped == 1, (kept, skipped))
+    invalid.remove_forum("A吧")
+    check("删除后为空", invalid.list_forums() == [])
+
+
+def test_banned_and_invalid_forums():
+    """0.6.2：吧已查封跳过不急停；手动标记的失效吧直接过滤。"""
+    import invalid
+
+    reset_files()
+    forums = [FakeForum("closed"), FakeForum("ok1")]
+    state, _client = asyncio.run(run_sign(
+        forums, {"closed": FakeErr(340006, "")}))
+    check("340006 跳过且不计失败",
+          state["forum_banned"] == 1 and state["forum_failed"] == 0,
+          state)
+    check("340006 不触发熔断/硬停",
+          state.get("breaker") is None and state.get("hard_stopped") is None,
+          state)
+    check("340006 其余吧继续签到", state["forum_success"] == 1, state)
+    check("报告说明已查封跳过",
+          "已查封/关闭" in signer.report_text())
+    check("吧已查封会自动记入失效贴吧",
+          invalid.is_invalid("closed") is True, invalid.list_forums())
+    invalid.remove_forum("closed")
+
+    reset_files()
+    invalid.add_forum("badmark")
+    try:
+        forums = [FakeForum("badmark"), FakeForum("ok1")]
+        state2, client2 = asyncio.run(run_sign(forums))
+        check("手动标记的失效吧被过滤",
+              state2["forum_invalid"] == 1 and state2["forum_checked"] == 1,
+              state2)
+        check("失效吧不发补签请求",
+              all(not (c[0] == "sign_forum" and c[1] == "badmark")
+                  for c in client2.calls), client2.calls)
+    finally:
+        invalid.remove_forum("badmark")
+
+
+def test_pause_resume():
+    """0.6.2：一键签到支持暂停/继续，暂停期间不发新请求。"""
+    import time as _time
+
+    reset_files()
+    check("默认未暂停", signer.is_paused() is False)
+    signer.set_paused(True)
+    check("暂停标志生效", signer.is_paused() is True)
+    signer.set_paused(False)
+    check("继续后标志清除", signer.is_paused() is False)
+
+    forums = [FakeForum("p{}".format(i)) for i in range(4)]
+
+    class PauseClient(FakeClient):
+        def __init__(self, bduss):
+            super().__init__(bduss)
+            self.forums = forums
+
+    import types
+    mod = types.ModuleType("aiotieba")
+    mod.Client = PauseClient
+    mod.ReqUInfo = types.SimpleNamespace(BASIC=1, ALL=2)
+    sys.modules["aiotieba"] = mod
+    FakeClient.instances = []
+    account = {"id": 1, "name": "暂停账号", "mask": "mask"}
+    state = signer._new_state("pause-run", account)
+    signer._state = state
+    signer.set_paused(True)
+
+    async def scenario():
+        task = asyncio.create_task(signer._sign_async(state, FAKE_BDUSS))
+        await asyncio.sleep(0.2)
+        client = FakeClient.instances[-1] if FakeClient.instances else None
+        before = sum(1 for c in (client.calls if client else [])
+                     if c[0] == "sign_forum")
+        signer.set_paused(False)
+        await asyncio.wait_for(task, 3)
+        return before
+
+    try:
+        before = asyncio.run(scenario())
+        check("暂停期间没有补签请求", before == 0, before)
+        check("继续后全部完成", state["forum_success"] == 4, state)
+    finally:
+        signer.set_paused(False)
+        signer._state = None
+
+
+def test_tier_settings():
+    """M3a：签到档位设置、clamp、红档未解锁与并发接线。"""
+    import tiers
+
+    reset_files()
+    check("档位表有 6 档", len(tiers.TIERS) == 6)
+    check("红档已解锁（M3b）",
+          tiers.RED_UNLOCKED is True and tiers.max_open_level() == 5)
+    check("颜色按 蓝/蓝/黄/黄/红/红",
+          [t.color for t in tiers.TIERS] ==
+          ["blue", "blue", "amber", "amber", "red", "red"],
+          [t.color for t in tiers.TIERS])
+    check("clamp 99 -> 5", tiers.clamp(99) == 5)
+    check("clamp -1 -> 0", tiers.clamp(-1) == 0)
+    check("clamp 非数字 -> 默认档", tiers.clamp("x") == tiers.DEFAULT_LEVEL)
+    check("危险+ 图标带 FE0F", "\ufe0f" in tiers.get(5).icon)
+    check("标准档点赞延迟 0.25–0.50",
+          tiers.get(1).like_delay == (0.25, 0.50))
+    check("标准档点赞速率约 10.5 次/秒",
+          abs(tiers.like_rate_per_sec(tiers.get(1)) - 10.5) < 0.2,
+          tiers.like_rate_per_sec(tiers.get(1)))
+    check("危险+ 点赞速率约 100 次/秒",
+          abs(tiers.like_rate_per_sec(tiers.get(5)) - 103) < 2,
+          tiers.like_rate_per_sec(tiers.get(5)))
+
+    check("签到档位默认=标准", signer.get_settings()["level"] == 1)
+    st = signer.save_settings({"level": 0})
+    check("签到档位可保存到保守",
+          st["level"] == 0 and st["sign_concurrency"] == 2, st)
+    check("红档已解锁（max_open=5）",
+          signer.get_settings()["max_open_level"] == 5)
+    st = signer.save_settings({"level": 5})
+    check("签到档位可保存到危险+",
+          st["level"] == 5 and st["sign_concurrency"] == 16, st)
+    # 手改配置 99：clamp 到 5 -> 显示危险+（清单 5.6 验收）
+    with open(signer._data_path(signer._SETTINGS_FILENAME), "w",
+              encoding="utf-8") as fh:
+        json.dump({"level": 99}, fh)
+    st = signer.get_settings()
+    check("手改 level=99 压回危险+",
+          st["stored_level"] == 5 and st["level"] == 5
+          and st["name"] == "危险+", st)
+
+    # 档位 0（并发 2）要真的限制住并写进运行状态
+    signer.save_settings({"level": 0})
+    forums = [FakeForum("t{}".format(i)) for i in range(4)]
+    state, client = asyncio.run(run_sign(forums))
+    check("保守档签到并发 <= 2", client.max_active <= 2, client.max_active)
+    check("运行状态带档位", state.get("tier_level") == 0,
+          state.get("tier_level"))
+
+    # 极速档（并发 8）必须真的用上 8 个并发
+    signer.save_settings({"level": 3})
+    forums = [FakeForum("c{}".format(i)) for i in range(8)]
+    _state3, client3 = asyncio.run(run_sign(forums))
+    check("极速档补签并发=8", client3.max_active == 8, client3.max_active)
+    signer.save_settings({"level": 1})
+
+
 def main():
     install_fake_aiotieba()
     print("== 错误码表 =="); test_codes()
     print("== 脱敏 =="); test_redact()
     print("== 签到主流程 =="); test_signer_flow()
     print("== msign 警告 =="); test_msign_warning()
+    print("== msign 跳过继续（用户反馈） =="); test_msign_skip_and_continue()
+    print("== 硬停与熔断（M3b） =="); test_hard_stop_and_breaker()
+    print("== 查封/失效吧（0.6.2） =="); test_banned_and_invalid_forums()
+    print("== 失效吧模块（0.6.2） =="); test_invalid_module()
+    print("== 暂停/继续（0.6.2） =="); test_pause_resume()
     print("== 账号入口 =="); test_account_gate_failure()
     print("== 网络分类 =="); test_network_error_category()
+    print("== 关注列表并行预取（S4） =="); test_follow_pages_prefetch()
+    print("== 多账号并行（S8） =="); test_multi_accounts_parallel()
     print("== 成长等级签到 =="); test_growth_step()
+    print("== 档位设置（M3a） =="); test_tier_settings()
     print("== 自动签到 warnings =="); test_autosign_warning_not_failure()
+    print("== 自动重试（用户反馈） =="); test_autosign_retry()
     print("== 自动模块 =="); test_auto_modules()
     print()
     print("{} checks, {} failed".format(TOTAL[0], len(FAILS)))
