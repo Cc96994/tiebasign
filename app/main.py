@@ -179,8 +179,11 @@ main { padding: 20px; max-width: 560px; margin: 0 auto; }
   height: 26px; margin-top: -8px; border-radius: 50%%; background: #fff;
   border: 3px solid #2B5CE6; }
 .tier-slider.blue::-webkit-slider-thumb { border-color: #2B5CE6; }
+.tier-slider.green::-webkit-slider-thumb { border-color: #0BA36B; }
 .tier-slider.amber::-webkit-slider-thumb { border-color: #E8930C; }
 .tier-slider.red::-webkit-slider-thumb { border-color: #E5484D; }
+.tier-slider.like-track::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, #0BA36B 0 50%%, #E8930C 50%% 75%%, #E5484D 75%% 100%%); }
 .tier-details { margin-top: 10px; }
 .tier-details summary { color: %(primary)s; font-size: 13px; font-weight: 700;
   cursor: pointer; }
@@ -641,7 +644,7 @@ def _page_settings():
         "<span>随机点赞设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.6.3 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.6.4 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -817,40 +820,65 @@ def _size_text(num):
     return "{} KB".format(max(1, num // 1024))
 
 
+def _tier_items(kind):
+    return tiers.TIERS if kind == "sign" else tiers.LIKE_TIERS
+
+
 def _tier_meta(kind, tier):
     if kind == "sign":
         return "签到并发 {}".format(tier.sign_concurrency)
-    lo, hi = tier.like_delay
+    lo, hi = tier.delay
     return "点赞并发 {} · 每次间隔 {:.2f}–{:.2f} 秒".format(
-        tier.like_concurrency, lo, hi)
+        tier.concurrency, lo, hi)
 
 
-def _tier_labels():
-    return [(t.icon + " " if t.icon else "") + t.name for t in tiers.TIERS]
+def _tier_labels(kind):
+    return [(t.icon + " " if t.icon else "") + t.name
+            for t in _tier_items(kind)]
+
+
+def _tier_rates(kind):
+    if kind == "sign":
+        return ["", "", "", "", "68 次/秒", "100 次/秒"]
+    return ["{:.0f} 次/秒".format(t.rate) for t in tiers.LIKE_TIERS]
 
 
 def _tier_section(kind, st):
-    """速度档位滑块（M3a/M3b，D6–D8）。kind: sign | like。"""
-    level = int(st.get("level") or 0)
-    tier = tiers.get(level)
-    metas = [_tier_meta(kind, t) for t in tiers.TIERS]
-    labels = _tier_labels()
+    """速度档位滑块（M3a/M3b，0.6.4 点赞四档）。kind: sign | like。"""
+    items = _tier_items(kind)
+    level = max(0, min(len(items) - 1, int(st.get("level") or 0)))
+    tier = tiers.get(level) if kind == "sign" else tiers.get_like(level)
+    metas = [_tier_meta(kind, t) for t in items]
+    labels = _tier_labels(kind)
+    if kind == "sign":
+        title = "签到速度档位"
+        desc = ("档位调的是<b>速度</b>，不是成功率；越高越容易被百度限流，"
+                "可能导致当天部分吧签不上。危险档会先弹二次确认。")
+        detail = ("六个档位只改并发和间隔：保守 / 标准 / 激进 / 极速逐步变快；"
+                  "危险 / 危险+ 的点赞请求约 68 / 100 次每秒，这个量级下"
+                  "能不能签全不由客户端决定。<br>撞到限流会自动降到保守档"
+                  "继续；遇到验证码/登录问题，或保守档仍被限流时，本次会停止"
+                  "剩余补签并明确报错。")
+        track = ""
+    else:
+        title = "随机点赞速度档位"
+        desc = ("四个档位只改并发；速率自适应：先在保守速率跑，没被限流才"
+                "逐步加速，撞到限流会减半并记住。第四档红色，会先二次确认。")
+        detail = ("四个档位的并发分别是 3 / 5 / 8 / 12；前两档绿色、第三档"
+                  "黄色、第四档红色。点赞速率还会按运行结果自适应，避免一"
+                  "上来就打满触发 3280004。")
+        track = " like-track"
     return (
         "<div class='card'><div class='title'>{}速度档位</div>"
-        "<div class='hint'>档位调的是<b>速度</b>，不是成功率；越高越容易被"
-        "百度限流，可能导致当天部分吧签不上。危险档会先弹二次确认。</div>"
+        "<div class='hint'>{}</div>"
         "<div class='tier-value'>"
         "<span class='tier-name' id='tier_{}_name'>{}</span>"
         "<span class='tier-meta' id='tier_{}_meta'>{}</span></div>"
-        "<input class='tier-slider {}' type='range' min='0' max='5' "
+        "<input class='tier-slider {}{}' type='range' min='0' max='{}' "
         "step='1' value='{}' id='tier_{}'>"
         "<div class='hint' id='tier_{}_note'></div>"
         "<details class='tier-details'><summary>风险提示（点开看）</summary>"
-        "<div class='hint'>六个档位只改并发和间隔：保守 / 标准 / 激进 / 极速"
-        "逐步变快；危险 / 危险+ 的点赞请求约 68 / 100 次每秒，这个量级下"
-        "能不能签全不由客户端决定。<br>撞到限流会自动降到保守档继续；"
-        "遇到验证码/登录问题，或保守档仍被限流时，本次会停止剩余补签"
-        "并明确报错。</div>"
+        "<div class='hint'>{}</div>"
         "</details>"
         "<div class='overlay' id='tier_confirm_{}' style='display:none'>"
         "<div class='box'>"
@@ -865,27 +893,31 @@ def _tier_section(kind, st):
         "</div>"
     ).format(
         "签到" if kind == "sign" else "随机点赞",
+        html.escape(desc),
         kind, html.escape(labels[level]),
         kind, html.escape(metas[level]),
-        tier.color, level, kind,
+        tier.color, track, len(items) - 1, level, kind,
         kind,
+        html.escape(detail),
         kind, kind, kind, kind)
 
 
 def _tier_script(kind, st):
-    level = int(st.get("level") or 0)
-    names = json.dumps(_tier_labels(), ensure_ascii=False)
-    metas = json.dumps([_tier_meta(kind, t) for t in tiers.TIERS],
+    items = _tier_items(kind)
+    level = max(0, min(len(items) - 1, int(st.get("level") or 0)))
+    names = json.dumps(_tier_labels(kind), ensure_ascii=False)
+    metas = json.dumps([_tier_meta(kind, t) for t in items],
                        ensure_ascii=False)
-    colors = json.dumps([t.color for t in tiers.TIERS], ensure_ascii=False)
-    rates = json.dumps(["", "", "", "", "68 次/秒", "100 次/秒"],
-                       ensure_ascii=False)
+    colors = json.dumps([t.color for t in items], ensure_ascii=False)
+    rates = json.dumps(_tier_rates(kind), ensure_ascii=False)
+    track = " like-track" if kind == "like" else ""
+    red_at = 4 if kind == "sign" else 3
     api = "/api/sign/settings" if kind == "sign" else "/api/like/settings"
     return """
 <script>
 (function(){
 var NAMES=%(names)s, METAS=%(metas)s, COLORS=%(colors)s, RATES=%(rates)s;
-var START=%(level)d;
+var START=%(level)d, TRACK='%(track)s', RED_AT=%(red_at)d;
 var el=document.getElementById('tier_%(kind)s');
 if(!el){return;}
 var nameEl=document.getElementById('tier_%(kind)s_name');
@@ -911,10 +943,10 @@ function tierToast(msg){
   setTimeout(function(){t.style.display='none';},3000);
 }
 function paint(v){
-  el.className='tier-slider '+COLORS[v];
+  el.className='tier-slider'+TRACK+' '+COLORS[v];
   nameEl.textContent=NAMES[v];
   metaEl.textContent=METAS[v];
-  noteEl.textContent=(v>=4)?
+  noteEl.textContent=(v>=RED_AT)?
     ('危险档：连续请求约 '+RATES[v]+'，可能触发百度风控'):'';
 }
 function save(v){
@@ -933,10 +965,10 @@ function save(v){
 el.addEventListener('input',function(){paint(parseInt(el.value,10));});
 el.addEventListener('change',function(){
   var v=parseInt(el.value,10);
-  if(v>=4){
+  if(v>=RED_AT){
     pending=v;
     confirmText.textContent='「'+NAMES[v]+'」是危险档：连续请求约 '+
-      RATES[v]+'，可能触发百度风控导致部分吧签到失败。确定使用？';
+      RATES[v]+'，可能触发百度风控导致部分吧失败。确定使用？';
     confirmBox.style.display='flex';
     return;
   }
@@ -953,7 +985,8 @@ paint(parseInt(el.value,10));
 })();
 </script>
 """ % {"names": names, "metas": metas, "colors": colors, "rates": rates,
-       "level": level, "kind": kind, "api": api}
+       "level": level, "kind": kind, "api": api, "track": track,
+       "red_at": red_at}
 
 
 def _page_settings_sign():

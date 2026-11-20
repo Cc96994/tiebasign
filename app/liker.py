@@ -48,12 +48,12 @@ _RN = 30
 #: L1/L2：进程内累积，每 20 个「ok 状态变化」才整文件落盘一次，结束再落一次。
 _FLUSH_EVERY = 20
 _MIN_LIKE_RATE = 1.0
-#: 0.6.3：点赞速率硬上限。档位表里 18 并发/0.05s 间隔算出来约 100 次/秒，
-#: 实测会触发 3200004/3280004；按当前可用的标准档估算，上限取 12 次/秒，
-#: 并且令牌桶 burst=1，避免开跑瞬间同时打出一批请求。
+#: 没撞过限流时从 6 次/秒起步；每次整轮干净就 +1，撞一次就减半并记住。
+_LIKE_START_RATE = 6.0
+#: 0.6.4：点赞速率硬上限。四档显式速率 4/7/10/12，令牌桶 burst=1。
 _LIKE_RATE_CAP = 12.0
-#: L4：撞 3280004 后的全局冷却时间（秒）；测试可调小。
-_RL_BACKOFF = (5.0, 12.0)
+#: L4：撞 3280004 后的全局冷却时间（秒）；0.6.4 拉长，避免连环撞。
+_RL_BACKOFF = (20.0, 45.0)
 
 #: 分段耗时（P0-2）：拉列表 / 取帖 / 点赞前等待 / 点赞请求。
 PHASE_LIST = "list"
@@ -218,9 +218,9 @@ def _record_forum(data, account_id, fname, ok, tid=None, title=None,
 
 def get_settings():
     data = _load()
-    stored = tiers.clamp(data.get("level", tiers.DEFAULT_LEVEL))
-    level = min(stored, tiers.max_open_level())
-    tier = tiers.get(level)
+    stored = tiers.clamp_like(data.get("level", tiers.LIKE_DEFAULT_LEVEL))
+    level = min(stored, tiers.max_like_level())
+    tier = tiers.get_like(level)
     accounts = []
     for aid, acct in sorted(data["accounts"].items(),
                             key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0):
@@ -237,22 +237,25 @@ def get_settings():
         "name": tier.name,
         "icon": tier.icon,
         "color": tier.color,
-        "like_concurrency": tier.like_concurrency,
-        "like_delay": list(tier.like_delay),
+        "like_concurrency": tier.concurrency,
+        "like_delay": list(tier.delay),
         "like_rate_per_sec": round(tiers.like_rate_per_sec(tier), 1),
-        "max_level": tiers.TIER_COUNT - 1,
-        "max_open_level": tiers.max_open_level(),
-        "red_unlocked": tiers.RED_UNLOCKED,
+        "max_level": tiers.LIKE_TIER_COUNT - 1,
+        "max_open_level": tiers.max_like_level(),
+        "red_unlocked": True,
     }
 
 
 def save_settings(payload):
-    """保存点赞侧的速度档位；红档未解锁时服务端拒绝。"""
+    """保存点赞侧的速度档位（四档 0–3）。"""
     if not isinstance(payload, dict):
         raise ValueError("设置格式不对")
-    level = tiers.clamp(payload.get("level", tiers.DEFAULT_LEVEL))
-    if not tiers.can_open(level):
-        raise ValueError("危险档位尚未解锁")
+    try:
+        level = int(payload.get("level", tiers.LIKE_DEFAULT_LEVEL))
+    except (TypeError, ValueError):
+        level = tiers.LIKE_DEFAULT_LEVEL
+    if level < 0 or level > tiers.max_like_level():
+        raise ValueError("点赞档位只有四档（0–3）")
     data = _load()
     data["level"] = level
     _save(data)
@@ -406,11 +409,9 @@ def start(pairs):
     return run_id, None
 
 
-def _rate_limit_state(data):
-    """当天学到的限速值（撞过 3280004 后降下来的速率）。"""
+def _learned_rate(data):
+    """之前运行学到的点赞速率；没有则 None。"""
     info = data.get("rate_limit") or {}
-    if info.get("date") != _today():
-        return None
     try:
         rate = float(info.get("rate") or 0)
     except (TypeError, ValueError):
@@ -423,12 +424,12 @@ def _like_rate_for_tier(tier):
 
 
 def _starting_rate(tier, data):
-    """按档位算速率，再叠加当天学到的降速值，最后夹到硬上限。"""
-    rate = _like_rate_for_tier(tier)
-    learned = _rate_limit_state(data)
+    """没学过就从保守速率起步；学过就沿用，随后由 AIMD 慢慢加。"""
+    base = _like_rate_for_tier(tier)
+    learned = _learned_rate(data)
     if learned:
-        rate = min(rate, learned)
-    return max(_MIN_LIKE_RATE, rate)
+        return max(_MIN_LIKE_RATE, min(base, learned))
+    return max(_MIN_LIKE_RATE, min(base, _LIKE_START_RATE))
 
 
 def _describe(err):
@@ -560,12 +561,14 @@ async def _like_account_async(account, bduss):
     sub = _sub_for(aid)
     # M3a / D4：档位只在入口读一次；协程里不再读盘。
     cfg = _load()
-    tier = tiers.get(min(tiers.clamp(cfg.get("level", tiers.DEFAULT_LEVEL)),
-                         tiers.max_open_level()))
-    like_concurrency = max(1, tier.like_concurrency)
-    like_delay = tuple(tier.like_delay)
+    tier = tiers.get_like(min(
+        tiers.clamp_like(cfg.get("level", tiers.LIKE_DEFAULT_LEVEL)),
+        tiers.max_like_level()))
+    like_concurrency = max(1, tier.concurrency)
+    like_delay = tuple(tier.delay)
     like_rate = _starting_rate(tier, cfg)
     limiter = None
+    flags = {"stop": False, "rate_limited": 0}
     _update_account(aid, tier_level=tier.level, tier_name=tier.name)
     run_started = _now_ms()
     store = _load()
@@ -616,7 +619,6 @@ async def _like_account_async(account, bduss):
             # 速率本身也被 _LIKE_RATE_CAP 和当天学到的降速值压住。
             limiter = _RateLimiter(like_rate, 1.0)
             cooldown = {"until": 0.0}
-            flags = {"stop": False}
             rng = random.SystemRandom()
 
             async def _wait_if_paused():
@@ -736,9 +738,19 @@ async def _like_account_async(account, bduss):
     finally:
         # 当天点过的吧重跑会直接 skip，只有隔天首跑的数据才能证明提速；
         # 所以分段耗时必须落进 tiebasign_like.json，不能只在内存里。
-        # 0.6.3：撞过限流就把学到的速率记下来，当天后续运行直接从低速开始。
-        if limiter is not None and limiter.rate < like_rate:
-            store["rate_limit"] = {"date": _today(),
-                                   "rate": round(limiter.rate, 2)}
+        # 0.6.4：AIMD——整轮干净就 +1 次/秒，撞过 3280004 就沿用减半后的速率。
+        attempts = (int(sub.get("success") or 0)
+                    + int(sub.get("failed") or 0))
+        if limiter is not None and attempts > 0:
+            if flags.get("rate_limited"):
+                new_rate = max(_MIN_LIKE_RATE, limiter.rate)
+            else:
+                new_rate = min(_like_rate_for_tier(tier),
+                               (limiter.rate or like_rate) + 1.0)
+            store["rate_limit"] = {
+                "rate": round(new_rate, 2),
+                "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "limited": bool(flags.get("rate_limited")),
+            }
         _note_last_run(store, sub, _now_ms() - run_started)
         _flush()

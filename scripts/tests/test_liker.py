@@ -30,13 +30,14 @@ import liker  # noqa: E402
 import tiers  # noqa: E402
 import tieba_api  # noqa: E402
 
-# 测试不需要真的等 0.25–0.5 秒：把档位表查表换成一个「零延迟、5 并发」的测试档。
-# 真实档位表、clamp 和设置页在 test_signer / test_ui_update 里验证。
-_REAL_TIER_GET = tiers.get
-_TEST_TIER = tiers.Tier(level=1, name="标准", icon="", sign_concurrency=4,
-                        like_concurrency=5, like_delay=(0, 0), color="blue")
-_TEST_TIER_GET = lambda level: _TEST_TIER
-tiers.get = _TEST_TIER_GET
+# 测试不需要真的等 0.25–0.5 秒：把点赞档位查表换成一个「零延迟、5 并发」的测试档。
+# 真实四档表、clamp 和设置页在 test_tier_settings / test_ui_update 里验证。
+_REAL_LIKE_GET = tiers.get_like
+_TEST_LIKE_TIER = tiers.LikeTier(level=1, name="二档", icon="",
+                                 concurrency=5, delay=(0, 0), rate=100.0,
+                                 color="green")
+_TEST_LIKE_GET = lambda level: _TEST_LIKE_TIER
+tiers.get_like = _TEST_LIKE_GET
 
 TOTAL = [0]
 FAILS = []
@@ -392,27 +393,42 @@ def test_rate_limit_cooldown():
 
 
 def test_tier_settings():
-    """M3a：点赞档位设置、clamp 与红档未解锁。"""
+    """0.6.4：点赞四档（并发 3/5/8/12，绿/绿/黄/红）。"""
     reset()
-    tiers.get = _REAL_TIER_GET
+    tiers.get_like = _REAL_LIKE_GET
     try:
         st = liker.get_settings()
-        check("点赞档位默认=标准", st["level"] == 1, st)
+        check("点赞默认=二档", st["level"] == 1 and st["name"] == "二档", st)
+        check("二档并发=5、绿色",
+              st["like_concurrency"] == 5 and st["color"] == "green", st)
+        st = liker.save_settings({"level": 0})
+        check("一档并发=3、绿色",
+              st["level"] == 0 and st["like_concurrency"] == 3
+              and st["color"] == "green", st)
         st = liker.save_settings({"level": 2})
-        check("点赞档位可保存到激进", st["level"] == 2, st)
-        check("点赞设置页能读回激进", liker.get_settings()["level"] == 2)
-        st = liker.save_settings({"level": 5})
-        check("点赞档位可保存到危险+",
-              st["level"] == 5 and st["like_concurrency"] == 18, st)
+        check("三档并发=8、黄色",
+              st["level"] == 2 and st["like_concurrency"] == 8
+              and st["color"] == "amber", st)
+        st = liker.save_settings({"level": 3})
+        check("四档并发=12、红色",
+              st["level"] == 3 and st["like_concurrency"] == 12
+              and st["color"] == "red", st)
+        try:
+            liker.save_settings({"level": 4})
+            rejected = False
+        except ValueError:
+            rejected = True
+        check("点赞只有四档，level=4 被拒", rejected)
         data = liker._load()
         data["level"] = 99
         liker._save(data)
         st = liker.get_settings()
-        check("手改 level=99 压回 5（stored）",
-              st["stored_level"] == 5 and st["level"] == 5, st)
+        check("手改 level=99 压回四档",
+              st["stored_level"] == 3 and st["level"] == 3
+              and st["name"] == "四档", st)
         liker.save_settings({"level": 1})
     finally:
-        tiers.get = _TEST_TIER_GET
+        tiers.get_like = _TEST_LIKE_GET
 
 
 def test_banned_and_invalid_forums():
@@ -449,24 +465,26 @@ def test_banned_and_invalid_forums():
 
 
 def test_like_rate_cap():
-    """0.6.3：点赞速率封顶 + 当天自适应降速。"""
+    """0.6.4：四档目标速率 + AIMD 起步/记忆。"""
     reset()
-    real_get = _REAL_TIER_GET
-    tiers.get = real_get
+    tiers.get_like = _REAL_LIKE_GET
     try:
-        check("标准档速率约 10.5",
-              abs(liker._like_rate_for_tier(tiers.get(1)) - 10.5) < 0.2,
-              liker._like_rate_for_tier(tiers.get(1)))
-        check("极速档速率封顶 12",
-              liker._like_rate_for_tier(tiers.get(3)) == 12.0)
-        data = {"rate_limit": {"date": liker._today(), "rate": 3.0}}
-        check("当天学到的降速优先",
-              liker._starting_rate(tiers.get(3), data) == 3.0)
-        data2 = {"rate_limit": {"date": "2000-01-01", "rate": 3.0}}
-        check("隔天重新按档位",
-              liker._starting_rate(tiers.get(3), data2) == 12.0)
+        check("一档目标速率 4",
+              liker._like_rate_for_tier(tiers.get_like(0)) == 4.0)
+        check("三档目标速率 10",
+              liker._like_rate_for_tier(tiers.get_like(2)) == 10.0)
+        check("四档目标速率 12",
+              liker._like_rate_for_tier(tiers.get_like(3)) == 12.0)
+        check("没学过时四档从 6 起步",
+              liker._starting_rate(tiers.get_like(3), {}) == 6.0)
+        check("学过 3 就沿用 3",
+              liker._starting_rate(
+                  tiers.get_like(3), {"rate_limit": {"rate": 3.0}}) == 3.0)
+        check("学过 20 夹回档位上限 12",
+              liker._starting_rate(
+                  tiers.get_like(3), {"rate_limit": {"rate": 20.0}}) == 12.0)
     finally:
-        tiers.get = _TEST_TIER_GET
+        tiers.get_like = _TEST_LIKE_GET
 
 
 def test_pause_flag():

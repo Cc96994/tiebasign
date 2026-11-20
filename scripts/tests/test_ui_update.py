@@ -220,10 +220,14 @@ def page_content_checks():
     like_tier_page = main._page_settings_like()
     check("随机点赞设置页有速度滑块",
           "id='tier_like'" in like_tier_page
-          and "type='range'" in like_tier_page)
-    check("档位滑块有蓝/黄/红三组颜色 class",
+          and "type='range'" in like_tier_page
+          and "max='3'" in like_tier_page)
+    check("点赞四档：一/二/三/四档",
+          all(k in like_tier_page for k in ("一档", "二档", "三档", "四档")))
+    check("档位滑块有绿/黄/红颜色 class",
           all(k in main._CSS for k in
-              (".tier-slider.blue", ".tier-slider.amber", ".tier-slider.red")))
+              (".tier-slider.green", ".tier-slider.amber",
+               ".tier-slider.red", ".tier-slider.like-track")))
     gs_html = main._page_settings_groupsign()
     check("吧群签到页能渲染",
           "吧群签到设置" in gs_html and "添加群" in gs_html, gs_html[:200])
@@ -369,10 +373,14 @@ def http_checks():
         check("点赞档位可保存到保守",
               status == 200 and body["ok"] is True
               and body["settings"]["level"] == 0, body)
-        status, body = post("/api/like/settings", {"level": 4})
-        check("点赞红档已解锁、可保存",
+        status, body = post("/api/like/settings", {"level": 3})
+        check("点赞四档可保存（并发 12）",
               status == 200 and body["ok"] is True
-              and body["settings"]["level"] == 4, body)
+              and body["settings"]["level"] == 3
+              and body["settings"]["like_concurrency"] == 12, body)
+        status, body = post("/api/like/settings", {"level": 4})
+        check("点赞只有四档，level=4 被拒",
+              status == 200 and body["ok"] is False, body)
         post("/api/sign/settings", {"level": 1})
         post("/api/like/settings", {"level": 1})
         status, invalid_page = get("/settings/invalid")
