@@ -183,7 +183,7 @@ main { padding: 20px; max-width: 560px; margin: 0 auto; }
 .tier-slider.amber::-webkit-slider-thumb { border-color: #E8930C; }
 .tier-slider.red::-webkit-slider-thumb { border-color: #E5484D; }
 .tier-slider.like-track::-webkit-slider-runnable-track {
-  background: linear-gradient(90deg, #0BA36B 0 50%%, #E8930C 50%% 75%%, #E5484D 75%% 100%%); }
+  background: linear-gradient(90deg, #2B5CE6 0 50%%, #E8930C 50%% 75%%, #E5484D 75%% 100%%); }
 .tier-details { margin-top: 10px; }
 .tier-details summary { color: %(primary)s; font-size: 13px; font-weight: 700;
   cursor: pointer; }
@@ -632,8 +632,6 @@ def _page_settings():
         "<span>运行诊断自检</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/auto'>"
         "<span>自动签到设置</span><span class='arrow'>›</span></a>"
-        "<a class='menu-item' href='/settings/sign'>"
-        "<span>签到速度档位</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/invalid'>"
         "<span>标记失效贴吧</span><span class='arrow'>›</span></a>"
         "<a class='menu-item' href='/settings/waterpost'>"
@@ -644,7 +642,7 @@ def _page_settings():
         "<span>随机点赞设置</span><span class='arrow'>›</span></a>"
         "</div>"
         "<div class='card'><div class='title'>关于</div>"
-        "<div class='hint'>贴吧签到助手 0.6.5 · aiotieba 4.7.1<br>"
+        "<div class='hint'>贴吧签到助手 0.6.6 · aiotieba 4.7.1<br>"
         "BDUSS 使用 Android Keystore AES-GCM 加密，仅保存在本机。</div>"
         "</div></main>"
     )
@@ -827,9 +825,7 @@ def _tier_items(kind):
 def _tier_meta(kind, tier):
     if kind == "sign":
         return "签到并发 {}".format(tier.sign_concurrency)
-    lo, hi = tier.delay
-    return "点赞并发 {} · 每次间隔 {:.2f}–{:.2f} 秒".format(
-        tier.concurrency, lo, hi)
+    return "点赞并发 {}".format(tier.concurrency)
 
 
 def _tier_labels(kind):
@@ -864,7 +860,7 @@ def _tier_section(kind, st):
         title = "随机点赞速度档位"
         desc = ("四个档位只改并发；速率自适应：先在保守速率跑，没被限流才"
                 "逐步加速，撞到限流会减半并记住。第四档红色，会先二次确认。")
-        detail = ("四个档位的并发分别是 3 / 5 / 8 / 12；前两档绿色、第三档"
+        detail = ("四个档位的并发分别是 3 / 5 / 8 / 12；前两档蓝色、第三档"
                   "黄色、第四档红色。点赞速率还会按运行结果自适应，避免一"
                   "上来就打满触发 3280004。")
         track = " like-track"
@@ -893,12 +889,12 @@ def _tier_section(kind, st):
         "</div>"
     ).format(
         "签到" if kind == "sign" else "随机点赞",
-        html.escape(desc),
+        desc,
         kind, html.escape(labels[level]),
         kind, html.escape(metas[level]),
         tier.color, track, len(items) - 1, level, kind,
         kind,
-        html.escape(detail),
+        detail,
         kind, kind, kind, kind)
 
 
@@ -1077,6 +1073,26 @@ def _page_settings_like():
         "百度文案里能读到解除时间就按它，读不到就按这里的分钟数，"
         "时间到自动继续。</div></div>"
     ).format(lk.get("limit_pause_minutes") or 5)
+    cache_card = (
+        "<div class='card'><div class='title'>帖子缓存</div>"
+        "<label class='menu-item'><span>提前缓存帖子</span>"
+        "<input type='checkbox' id='lk_cache'{} onchange='lkSaveCache()'>"
+        "</label>"
+        "<div class='hint'>每个吧提前缓存 7 个帖子；点赞时直接用缓存，"
+        "用完自动补一批；已经点赞过或无效的帖子会被清掉。</div>"
+        "<button class='btn btn-ghost' type='button' id='lk_cache_now' "
+        "onclick='lkCacheNow()'>立即缓存</button>"
+        "<div class='hint' id='lk_cache_state'></div></div>"
+    ).format(" checked" if lk.get("cache_enabled", True) else "")
+    rest_card = (
+        "<div class='card'><div class='title'>点赞休息</div>"
+        "<div class='form'><label>每 10 个赞休息（分钟，0-60）</label>"
+        "<input class='input' type='number' id='lk_rest' min='0' max='60' "
+        "value='{}' onchange='lkSaveRest()'></div>"
+        "<div class='hint'>0 表示不休息；休息期间不再发新的点赞请求。</div>"
+        "</div>"
+    ).format(lk.get("rest_minutes") if lk.get("rest_minutes") is not None
+             else 2)
     auto_card = (
         "<div class='card'><div class='title'>每日自动点赞</div>"
         "<label class='menu-item'><span>每天自动执行</span>"
@@ -1135,9 +1151,52 @@ body:JSON.stringify({limit_pause_minutes:v})})
 if(j.ok){lkToast('已保存：限流后暂停 '+v+' 分钟');}
 else{lkErr(j.detail||'保存失败');}})
 .catch(function(e){lkErr('请求失败：'+e);});}
+function lkSaveRest(){
+var v=parseInt(document.getElementById('lk_rest').value,10);
+fetch('/api/like/settings',{method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify({rest_minutes:v})})
+.then(function(r){return r.json();}).then(function(j){
+if(j.ok){lkToast('已保存：每 10 个赞休息 '+v+' 分钟');}
+else{lkErr(j.detail||'保存失败');}})
+.catch(function(e){lkErr('请求失败：'+e);});}
+function lkSaveCache(){
+var v=document.getElementById('lk_cache').checked;
+fetch('/api/like/settings',{method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify({cache_enabled:v})})
+.then(function(r){return r.json();}).then(function(j){
+if(j.ok){lkToast('帖子缓存已'+(v?'开启':'关闭'));}
+else{lkErr(j.detail||'保存失败');}})
+.catch(function(e){lkErr('请求失败：'+e);});}
+function lkPollCache(){
+fetch('/api/like/cache/state').then(function(r){return r.json();})
+.then(function(j){
+if(!j.ok||!j.state){return;}
+var s=j.state,el=document.getElementById('lk_cache_state');
+if(!el){return;}
+if(s.status==='running'||s.status==='starting'){
+el.textContent='缓存中：'+(s.done||0)+' / '+(s.total||0)+' · '+(s.step||'');
+setTimeout(lkPollCache,2000);
+}else if(s.status==='done'){
+el.textContent='缓存完成：'+(s.done||0)+' 个吧';
+}else if(s.status==='error'){
+el.textContent='缓存失败：'+(s.error||'');
+}}).catch(function(){});}
+function lkCacheNow(){
+var b=document.getElementById('lk_cache_now');b.disabled=true;
+fetch('/api/like/cache',{method:'POST',
+headers:{'Content-Type':'application/json'},body:'{}'})
+.then(function(r){return r.json();}).then(function(j){
+b.disabled=false;
+if(j.ok){lkToast('已开始缓存帖子');lkPollCache();}
+else{lkErr(j.detail||'启动失败');}})
+.catch(function(e){b.disabled=false;lkErr('请求失败：'+e);});}
+lkPollCache();
 </script>
 """
-    html_part = intro + _tier_section("like", lk) + pause_card + auto_card
+    html_part = (intro + _tier_section("like", lk) + pause_card + cache_card
+                 + rest_card + auto_card)
     return _page("随机点赞设置",
                  html_part + _tier_script("like", lk) + script, "settings")
 
@@ -1306,7 +1365,12 @@ b.disabled=false;b.textContent='立即执行一次（测试）';}})
 .catch(function(){b.disabled=false;b.textContent='立即执行一次（测试）';});});
 </script>
 """
-    body = html_part + script
+    sign_st = signer.get_settings()
+    html_part = html_part.replace(
+        "<div class='card'><div class='title'>仅失败通知",
+        _tier_section("sign", sign_st) +
+        "<div class='card'><div class='title'>仅失败通知")
+    body = html_part + script + _tier_script("sign", sign_st)
     return _page("自动签到设置", body, "settings")
 
 
@@ -1875,8 +1939,6 @@ class AppHandler(BaseHTTPRequestHandler):
                 _send_html(self, _page_settings_groupsign())
             elif path == "/settings/like":
                 _send_html(self, _page_settings_like())
-            elif path == "/settings/sign":
-                _send_html(self, _page_settings_sign())
             elif path == "/settings/invalid":
                 _send_html(self, _page_settings_invalid())
             elif path == "/settings/update":
@@ -1920,6 +1982,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 import invalid
                 _send_json(self, {"ok": True,
                                   "forums": invalid.list_forums()})
+            elif path == "/api/like/cache/state":
+                _send_json(self, {"ok": True,
+                                  "state": liker.get_cache_state()})
             elif path == "/api/sign/state":
                 _send_json(self, {"ok": True, "state": signer.get_state()})
             elif path == "/api/like/state":
@@ -1979,6 +2044,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._api_like_pause(data)
             elif path == "/api/invalid":
                 self._api_invalid(data)
+            elif path == "/api/like/cache":
+                self._api_like_cache(data)
             elif path == "/api/auto/run-now":
                 self._api_auto_run_now()
             elif path == "/api/waterpost/settings":
@@ -2359,6 +2426,19 @@ class AppHandler(BaseHTTPRequestHandler):
         paused = bool((data or {}).get("paused"))
         now = liker.set_paused(paused)
         _send_json(self, {"ok": True, "paused": now})
+
+    def _api_like_cache(self, data):
+        try:
+            import autosign
+            pairs = autosign._all_pairs()
+            run_id, err = liker.start_cache(pairs)
+            if err:
+                _send_json(self, {"ok": False, "detail": err})
+                return
+            _send_json(self, {"ok": True, "run_id": run_id})
+        except Exception as exc:  # noqa: BLE001
+            _send_json(self, {"ok": False,
+                              "detail": "启动缓存失败：{}".format(exc)})
 
     def _api_invalid(self, data):
         import invalid
@@ -3165,6 +3245,8 @@ function renderLikeState(s){
       ' · 本次并发 '+(a.like_concurrency||0)+'</div>'+
       (a.auto_pause_text?'<div class="hint" style="color:#E8930C;'+
         'font-weight:700">自动暂停：'+escTxt(a.auto_pause_text)+'</div>':'')+
+      (a.rest_text?'<div class="hint" style="color:#E8930C;'+
+        'font-weight:700">休息中：'+escTxt(a.rest_text)+'</div>':'')+
       ((a.invalid_skipped||0)>0?'<div class="hint">已跳过 '+
         (a.invalid_skipped||0)+' 个手动标记的失效吧</div>':'')+
       moduleFailures(a.failures)+

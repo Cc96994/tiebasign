@@ -195,8 +195,8 @@ def page_content_checks():
           "id='gs_btn'" in sign_html2 and "开始吧群签到" in sign_html2)
     check("设置页有「吧群签到设置」入口",
           "/settings/groupsign" in main._page_settings())
-    check("设置页有「签到速度档位」入口",
-          "/settings/sign" in main._page_settings())
+    check("设置页没有独立的签到速度入口（已移入自动签到）",
+          "/settings/sign" not in main._page_settings())
     check("设置页有「标记失效贴吧」入口",
           "/settings/invalid" in main._page_settings()
           and "标记失效贴吧" in main._page_settings())
@@ -210,22 +210,25 @@ def page_content_checks():
           and "已标记" in invalid_page
           and "标记失效贴吧" in invalid_page, invalid_page[:200])
     like_page = main._page_settings_like()
+    check("点赞设置页有缓存/休息控件",
+          "id='lk_cache'" in like_page and "id='lk_rest'" in like_page
+          and "id='lk_cache_now'" in like_page)
     check("点赞设置页有被限流暂停分钟输入",
           "id='lk_pause_minutes'" in like_page
           and "被限流后自动暂停" in like_page)
     check("点赞卡片显示速度档位/自动暂停",
           "速度档位：" in main._JS_SIGN
           and "自动暂停：" in main._JS_SIGN)
-    sign_tier_page = main._page_settings_sign()
-    check("签到速度页有滑块与折叠风险提示",
-          "id='tier_sign'" in sign_tier_page
-          and "type='range'" in sign_tier_page
-          and "<details" in sign_tier_page
-          and "风险提示" in sign_tier_page, sign_tier_page[:200])
-    check("红档有二次确认对话框",
-          "id='tier_confirm_sign'" in sign_tier_page
-          and "确定使用" in sign_tier_page
-          and "tier_cancel_sign" in sign_tier_page, sign_tier_page[:200])
+    auto_page = main._page_settings_auto()
+    check("自动签到页有签到速度滑块与折叠风险提示",
+          "id='tier_sign'" in auto_page
+          and "type='range'" in auto_page
+          and "<details" in auto_page
+          and "风险提示" in auto_page)
+    check("自动签到页有红档二次确认对话框",
+          "id='tier_confirm_sign'" in auto_page
+          and "确定使用" in auto_page
+          and "tier_cancel_sign" in auto_page)
     like_tier_page = main._page_settings_like()
     check("随机点赞设置页有速度滑块",
           "id='tier_like'" in like_tier_page
@@ -235,7 +238,7 @@ def page_content_checks():
           all(k in like_tier_page for k in ("一档", "二档", "三档", "四档")))
     check("档位滑块有绿/黄/红颜色 class",
           all(k in main._CSS for k in
-              (".tier-slider.green", ".tier-slider.amber",
+              (".tier-slider.blue", ".tier-slider.amber",
                ".tier-slider.red", ".tier-slider.like-track")))
     gs_html = main._page_settings_groupsign()
     check("吧群签到页能渲染",
@@ -365,8 +368,8 @@ def http_checks():
               status == 200 and "id='tier_like'" in like_page
               and "type='range'" in like_page
               and "风险提示" in like_page)
-        status, sign_page = get("/settings/sign")
-        check("GET /settings/sign 200 且有速度档位滑块",
+        status, sign_page = get("/settings/auto")
+        check("GET /settings/auto 200 且有签到速度滑块",
               status == 200 and "id='tier_sign'" in sign_page
               and "type='range'" in sign_page and "<details" in sign_page)
         status, body = post("/api/sign/settings", {"level": 2})
@@ -391,7 +394,18 @@ def http_checks():
         check("点赞限流暂停分钟可保存",
               status == 200 and body["ok"] is True
               and body["settings"]["limit_pause_minutes"] == 7, body)
-        post("/api/like/settings", {"limit_pause_minutes": 5})
+        status, body = post("/api/like/settings", {
+            "cache_enabled": False, "rest_minutes": 3})
+        check("帖子缓存/休息设置可保存",
+              status == 200 and body["ok"] is True
+              and body["settings"]["cache_enabled"] is False
+              and body["settings"]["rest_minutes"] == 3, body)
+        status, raw = get("/api/like/cache/state")
+        check("缓存状态可读取",
+              status == 200 and json.loads(raw)["state"]["status"] == "idle")
+        post("/api/like/settings", {"limit_pause_minutes": 5,
+                                    "cache_enabled": True,
+                                    "rest_minutes": 2})
         status, body = post("/api/like/settings", {"level": 4})
         check("点赞只有四档，level=4 被拒",
               status == 200 and body["ok"] is False, body)

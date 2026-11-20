@@ -49,8 +49,8 @@ LikeTier = collections.namedtuple(
 #: 四档都开放；第四档红色，保存前仍要二次确认。concurrency 是用户明确
 #: 指定的 3/5/8/12；rate 是点赞侧令牌桶的上限，实际速率还会被 AIMD 下调。
 LIKE_TIERS = [
-    LikeTier(0, "一档", "", 3, (0.60, 0.90), 4.0, "green"),
-    LikeTier(1, "二档", "", 5, (0.45, 0.70), 7.0, "green"),
+    LikeTier(0, "一档", "", 3, (0.60, 0.90), 4.0, "blue"),
+    LikeTier(1, "二档", "", 5, (0.45, 0.70), 7.0, "blue"),
     LikeTier(2, "三档", "", 8, (0.35, 0.55), 10.0, "amber"),
     LikeTier(3, "四档", "", 12, (0.28, 0.45), 12.0, "red"),
 ]

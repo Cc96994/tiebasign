@@ -35,9 +35,12 @@ import tieba_api  # noqa: E402
 _REAL_LIKE_GET = tiers.get_like
 _TEST_LIKE_TIER = tiers.LikeTier(level=1, name="二档", icon="",
                                  concurrency=5, delay=(0, 0), rate=100.0,
-                                 color="green")
+                                 color="blue")
 _TEST_LIKE_GET = lambda level: _TEST_LIKE_TIER
 tiers.get_like = _TEST_LIKE_GET
+# 测试里不要真的等 5 秒/2 分钟；节奏逻辑由专门用例验证。
+liker._LIKE_INTERVAL = 0.0
+liker._REST_EVERY = 0
 
 TOTAL = [0]
 FAILS = []
@@ -49,6 +52,13 @@ def check(name, cond, extra=""):
           ("" if cond else "   <- " + repr(extra)))
     if not cond:
         FAILS.append(name)
+
+
+def no_cache():
+    """这些旧用例需要每次重新 get_threads；缓存由专门用例验证。"""
+    data = liker._load()
+    data["cache_enabled"] = False
+    liker._save(data)
 
 
 class FakeErr:
@@ -97,6 +107,7 @@ class FakeClient:
     thread_delay = 0.0
     thread_errs = {}
     instances = []
+    thread_extra = 0
     agree_active = 0
     agree_peak = 0
     fetch_active = 0
@@ -127,10 +138,11 @@ class FakeClient:
                 await asyncio.sleep(FakeClient.thread_delay)
             tid = FakeClient.tid_map.setdefault(fname,
                                                 2 + len(FakeClient.tid_map))
-            threads = FakeThreads([
-                FakeThread(1, fname, "置顶", is_top=True),
-                FakeThread(tid, fname, "普通帖"),
-            ])
+            posts = [FakeThread(1, fname, "置顶", is_top=True),
+                     FakeThread(tid, fname, "普通帖")]
+            for i in range(1, int(FakeClient.thread_extra or 0) + 1):
+                posts.append(FakeThread(tid + i, fname, "普通帖"))
+            threads = FakeThreads(posts)
             threads.err = FakeClient.thread_errs.get(fname)
             return threads
         finally:
@@ -174,6 +186,7 @@ def reset():
             os.remove(os.path.join(_PRIVATE, name))
     liker._state = None
     reset_counters()
+    FakeClient.thread_extra = 0
 
 
 def wait_done(timeout=10):
@@ -227,8 +240,8 @@ def test_one_like_per_forum():
 
     # ---- 0.6.0 P0-2：分段耗时（phase_ms）必须能拿到并落盘 --------------
     phases = sub.get("phase_ms") or {}
-    check("点赞 phase_ms 覆盖拉列表/取帖/等待/点赞",
-          all(k in phases for k in ("list", "fetch", "sleep", "agree")),
+    check("点赞 phase_ms 覆盖拉列表/取帖/点赞",
+          all(k in phases for k in ("list", "fetch", "agree")),
           phases)
     check("点赞 phase_ms 都是非负整数",
           all(isinstance(v, int) and v >= 0 for v in phases.values()),
@@ -241,6 +254,7 @@ def test_one_like_per_forum():
 
 def test_daily_guard_and_next_day():
     reset()
+    no_cache()
     forums = [types.SimpleNamespace(fname="吧A"),
               types.SimpleNamespace(fname="吧B")]
     state1 = run_like(forums)
@@ -260,6 +274,7 @@ def test_daily_guard_and_next_day():
 
 def test_failure_isolated():
     reset()
+    no_cache()
     forums = [types.SimpleNamespace(fname="吧A"),
               types.SimpleNamespace(fname="吧B")]
     state = run_like(forums, agree_errs={2: FakeErr(999999, "")})
@@ -279,6 +294,7 @@ def test_failure_isolated():
 def test_batched_writes():
     """L1/L2：整文件读写改成内存累积 + 批量落盘。"""
     reset()
+    no_cache()
     forums = [types.SimpleNamespace(fname="吧{:02d}".format(i))
               for i in range(25)]
     saves = []
@@ -308,6 +324,7 @@ def test_batched_writes():
 
     # 第二轮：同样的失败再失败一次，ok 状态没变，不应触发批量写盘
     reset()
+    no_cache()
     forums2 = [types.SimpleNamespace(fname="吧{:02d}".format(i))
                for i in range(3)]
     errs = {i: FakeErr(999999, "") for i in range(2, 5)}
@@ -356,7 +373,8 @@ def test_rate_limit_cooldown():
         liker._limit_wait_seconds = lambda err, minutes: (0.01, False)
         try:
             resp, err = await liker._agree_with_retry(
-                client, 7, sem, limiter, cooldown, flags, sub, 0, 5)
+                client, 7, sem, limiter, cooldown, flags, sub,
+                liker._IntervalGate(0), 5)
         finally:
             liker._limit_wait_seconds = old
         return resp, err, limiter, cooldown, sem, flags
@@ -383,7 +401,8 @@ def test_rate_limit_cooldown():
         liker._limit_wait_seconds = lambda err, minutes: (0.2, False)
         try:
             task = asyncio.ensure_future(liker._agree_with_retry(
-                client, 7, sem, limiter, cooldown, flags, sub, 0, 5))
+                client, 7, sem, limiter, cooldown, flags, sub,
+                liker._IntervalGate(0), 5))
             await asyncio.sleep(0.05)   # 第一次请求已撞限流，正在冷却
             got = await asyncio.wait_for(sem.acquire(), timeout=0.05)
             sem.release()
@@ -420,12 +439,12 @@ def test_tier_settings():
     try:
         st = liker.get_settings()
         check("点赞默认=二档", st["level"] == 1 and st["name"] == "二档", st)
-        check("二档并发=5、绿色",
-              st["like_concurrency"] == 5 and st["color"] == "green", st)
+        check("二档并发=5、蓝色",
+              st["like_concurrency"] == 5 and st["color"] == "blue", st)
         st = liker.save_settings({"level": 0})
-        check("一档并发=3、绿色",
+        check("一档并发=3、蓝色",
               st["level"] == 0 and st["like_concurrency"] == 3
-              and st["color"] == "green", st)
+              and st["color"] == "blue", st)
         st = liker.save_settings({"level": 2})
         check("三档并发=8、黄色",
               st["level"] == 2 and st["like_concurrency"] == 8
@@ -531,6 +550,81 @@ def test_like_rate_cap():
         tiers.get_like = _TEST_LIKE_GET
 
 
+def test_cache_helpers():
+    """0.6.6：缓存 tid 的写入/筛选/清理。"""
+    data = {"cache": {}}
+    liker._cache_set(data, "吧A", [11, 12, 13])
+    check("缓存写入", liker._cache_tids(data, "吧A") == [11, 12, 13])
+    liker._cache_remove(data, "吧A", 12)
+    check("缓存移除已点赞", liker._cache_tids(data, "吧A") == [11, 13])
+    liker._cache_mark_used(data, "吧A", 11)
+    check("已点赞记录", liker._cache_used(data, "吧A") == [11])
+    threads = [types.SimpleNamespace(tid=1, is_top=True, is_hide=False),
+               types.SimpleNamespace(tid=11, is_top=False, is_hide=False),
+               types.SimpleNamespace(tid=14, is_top=False, is_hide=True),
+               types.SimpleNamespace(tid=15, is_top=False, is_hide=False)]
+    check("缓存候选排除置顶/隐藏/已点赞",
+          liker._cache_candidates(threads, [11]) == [15])
+    check("缓存默认 7 个/开关默认开",
+          liker.get_settings()["cache_batch"] == 7
+          and liker.get_settings()["cache_enabled"] is True)
+    rid, err = liker.start_cache([])
+    check("空账号不启动手动缓存", rid is None and bool(err), (rid, err))
+    check("缓存状态默认 idle",
+          liker.get_cache_state().get("status") == "idle",
+          liker.get_cache_state())
+
+
+def test_cache_roundtrip():
+    """0.6.6：缓存后下一轮直接用缓存，不再 get_threads。"""
+    reset()
+    FakeClient.thread_extra = 6
+    liker.save_settings({"cache_enabled": True})
+    forums = [types.SimpleNamespace(fname="吧A")]
+    state1 = run_like(forums)
+    check("缓存首轮点赞成功", state1["accounts"][0]["success"] == 1, state1)
+    tids = liker._cache_tids(liker._load(), "吧A")
+    check("缓存保留剩余 6 个候选", len(tids) == 6, tids)
+    first_calls = [c.thread_calls for c in FakeClient.instances]
+    old = liker._today
+    liker._today = lambda: "2099-01-01"
+    try:
+        state2 = run_like(forums)
+    finally:
+        liker._today = old
+    check("缓存命中后第二天仍点赞成功",
+          state2["accounts"][0]["success"] == 1, state2)
+    check("缓存命中不再取帖",
+          all(not c.thread_calls for c in FakeClient.instances),
+          [c.thread_calls for c in FakeClient.instances])
+    check("首轮确实取过帖", any(first_calls), first_calls)
+
+
+def test_interval_gate():
+    """0.6.6：两个请求至少间隔设定秒数。"""
+    async def scenario():
+        gate = liker._IntervalGate(0.05)
+        started = time.monotonic()
+        await gate.wait()
+        await gate.wait()
+        return time.monotonic() - started
+
+    check("请求间隔门生效", asyncio.run(scenario()) >= 0.035)
+
+
+def test_rest_gate():
+    """0.6.6：休息窗等待并清理状态。"""
+    flags = {"rest_until": time.monotonic() + 0.05,
+             "rest_text": "测试休息"}
+    asyncio.run(liker._wait_rest(flags, {"account_id": 1}))
+    check("休息结束后清掉状态",
+          flags.get("rest_text") == "" and flags.get("rest_until") == 0,
+          flags)
+    check("休息分钟默认 2/夹取",
+          liker._clamp_rest_minutes(0) == 0
+          and liker._clamp_rest_minutes(999) == 60)
+
+
 def test_pause_flag():
     """0.6.2：点赞暂停标志可切换。"""
     reset()
@@ -576,6 +670,10 @@ def main():
     print("== 查封/失效吧（0.6.2） =="); test_banned_and_invalid_forums()
     print("== 点赞速率上限（0.6.3） =="); test_like_rate_cap()
     print("== 暂停标志（0.6.2） =="); test_pause_flag()
+    print("== 帖子缓存（0.6.6） =="); test_cache_helpers()
+    print("== 缓存命中（0.6.6） =="); test_cache_roundtrip()
+    print("== 休息窗（0.6.6） =="); test_rest_gate()
+    print("== 请求间隔（0.6.6） =="); test_interval_gate()
     print("== 暂停请求（0.6.2） =="); test_pause_pauses_likes()
     print()
     print("{} checks, {} failed".format(TOTAL[0], len(FAILS)))

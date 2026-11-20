@@ -53,6 +53,14 @@ _LIMIT_PAUSE_MAX = 60
 _LIMIT_RE = re.compile(
     r"(\d+)\s*(秒|分钟|小时|min|mins|minute|minutes|sec|secs|second|seconds|"
     r"hour|hours)", re.IGNORECASE)
+#: 0.6.6：每个吧提前缓存 7 个候选帖子；点赞请求固定间隔 5 秒（不显示）；
+#: 每 10 个赞休息 rest_minutes 分钟（默认 2，可改）。
+_CACHE_BATCH = 7
+_CACHE_USED_MAX = 30
+_LIKE_INTERVAL = 5.0
+_REST_EVERY = 10
+_REST_DEFAULT_MINUTES = 2
+_REST_MAX_MINUTES = 60
 #: L1/L2：进程内累积，每 20 个「ok 状态变化」才整文件落盘一次，结束再落一次。
 _FLUSH_EVERY = 20
 _MIN_LIKE_RATE = 1.0
@@ -72,6 +80,8 @@ PHASE_LIKE = "like"
 _lock = threading.RLock()
 _state = None
 _run_counter = 0
+_cache_state = None
+_cache_counter = 0
 #: 手动暂停（0.6.2 用户反馈）：set 时不再发新的取帖/点赞请求。
 _pause = threading.Event()
 
@@ -139,6 +149,28 @@ class _RateLimiter:
         self.capacity = max(1.0, min(self.capacity, self.rate))
 
 
+class _IntervalGate:
+    """0.6.6：全局点赞请求间隔，保证两次请求至少隔 ``seconds`` 秒。
+
+    并发再高也只按节奏逐个放行；不再依赖每个任务的随机 sleep。
+    """
+
+    def __init__(self, seconds):
+        self.seconds = max(0.0, float(seconds))
+        self._next = 0.0
+        self._lock = asyncio.Lock()
+
+    async def wait(self):
+        if self.seconds <= 0:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next - now)
+            self._next = max(now, self._next) + self.seconds
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+
 def _today():
     return time.strftime("%Y-%m-%d")
 
@@ -158,6 +190,23 @@ def _clamp_pause_minutes(value):
 def _limit_pause_minutes(data):
     return _clamp_pause_minutes(
         data.get("limit_pause_minutes", _LIMIT_PAUSE_DEFAULT))
+
+
+def _clamp_rest_minutes(value):
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        minutes = _REST_DEFAULT_MINUTES
+    return max(0, min(_REST_MAX_MINUTES, minutes))
+
+
+def _rest_minutes(data):
+    return _clamp_rest_minutes(
+        data.get("rest_minutes", _REST_DEFAULT_MINUTES))
+
+
+def _rest_seconds(minutes):
+    return int(minutes) * 60
 
 
 def _fmt_duration(seconds):
@@ -228,6 +277,95 @@ def _note_last_run(data, sub, elapsed_ms):
     }
 
 
+def _cache_map(data):
+    cache = data.get("cache")
+    if not isinstance(cache, dict):
+        cache = {}
+        data["cache"] = cache
+    return cache
+
+
+def _cache_tids(data, fname):
+    entry = _cache_map(data).get(fname) or {}
+    tids = entry.get("tids") if isinstance(entry, dict) else None
+    if not isinstance(tids, list):
+        return []
+    out = []
+    for tid in tids:
+        try:
+            tid = int(tid)
+        except (TypeError, ValueError):
+            continue
+        if tid > 0 and tid not in out:
+            out.append(tid)
+    return out
+
+
+def _cache_set(data, fname, tids):
+    used = _cache_used(data, fname)
+    _cache_map(data)[fname] = {
+        "tids": [int(t) for t in tids][:_CACHE_BATCH],
+        "used": used[-_CACHE_USED_MAX:],
+        "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _cache_remove(data, fname, tid):
+    tid = int(tid)
+    tids = [t for t in _cache_tids(data, fname) if t != tid]
+    _cache_set(data, fname, tids)
+
+
+def _cache_used(data, fname):
+    entry = _cache_map(data).get(fname) or {}
+    used = entry.get("used") if isinstance(entry, dict) else None
+    out = []
+    if isinstance(used, list):
+        for tid in used:
+            try:
+                tid = int(tid)
+            except (TypeError, ValueError):
+                continue
+            if tid > 0 and tid not in out:
+                out.append(tid)
+    return out
+
+
+def _cache_mark_used(data, fname, tid):
+    tid = int(tid)
+    used = [t for t in _cache_used(data, fname) if t != tid]
+    used.append(tid)
+    _cache_set_used(data, fname, used[-_CACHE_USED_MAX:])
+
+
+def _cache_set_used(data, fname, used):
+    entry = _cache_map(data).get(fname)
+    if not isinstance(entry, dict):
+        entry = {"tids": [], "used": []}
+    entry["used"] = [int(t) for t in used][-_CACHE_USED_MAX:]
+    _cache_map(data)[fname] = entry
+
+
+def _cache_candidates(threads, used):
+    """从一批帖子里挑最多 7 个可用 tid，排除置顶/隐藏/已点赞过的。"""
+    used = set(int(t) for t in used)
+    out = []
+    for thread in threads:
+        if getattr(thread, "is_top", False) or getattr(thread, "is_hide",
+                                                       False):
+            continue
+        try:
+            tid = int(getattr(thread, "tid", 0))
+        except (TypeError, ValueError):
+            continue
+        if tid <= 0 or tid in used or tid in out:
+            continue
+        out.append(tid)
+        if len(out) >= _CACHE_BATCH:
+            break
+    return out
+
+
 def _get_forum_record(data, account_id, fname):
     acct = data["accounts"].get(str(account_id)) or {}
     if acct.get("date") != _today():
@@ -292,6 +430,9 @@ def get_settings():
         "like_delay": list(tier.delay),
         "like_rate_per_sec": round(tiers.like_rate_per_sec(tier), 1),
         "limit_pause_minutes": _limit_pause_minutes(data),
+        "cache_enabled": bool(data.get("cache_enabled", True)),
+        "cache_batch": _CACHE_BATCH,
+        "rest_minutes": _rest_minutes(data),
         "max_level": tiers.LIKE_TIER_COUNT - 1,
         "max_open_level": tiers.max_like_level(),
         "red_unlocked": True,
@@ -314,6 +455,11 @@ def save_settings(payload):
     if "limit_pause_minutes" in payload:
         data["limit_pause_minutes"] = _clamp_pause_minutes(
             payload.get("limit_pause_minutes"))
+    if "cache_enabled" in payload:
+        data["cache_enabled"] = bool(payload.get("cache_enabled"))
+    if "rest_minutes" in payload:
+        data["rest_minutes"] = _clamp_rest_minutes(
+            payload.get("rest_minutes"))
     _save(data)
     return get_settings()
 
@@ -341,6 +487,8 @@ def _new_state(run_id, pairs):
             "paused": False,
             "auto_pause_until": 0,
             "auto_pause_text": "",
+            "rest_until": 0,
+            "rest_text": "",
             "invalid_skipped": 0,
             "failures": [],
             "error": None,
@@ -418,6 +566,91 @@ def set_paused(paused):
                     sub["step"] = ("已暂停（不再发新请求）" if paused
                                    else "逐个吧点赞")
     return paused
+
+
+def get_cache_state():
+    with _lock:
+        if _cache_state is None:
+            return {"status": "idle"}
+        return dict(_cache_state)
+
+
+def start_cache(pairs):
+    """手动预缓存：为每个账号的关注吧各缓存最多 7 个候选帖子。"""
+    global _cache_state, _cache_counter
+    with _lock:
+        if _cache_state is not None and _cache_state.get("status") in (
+                "starting", "running"):
+            return None, "缓存正在进行，请等待完成"
+        if _state is not None and _state.get("status") in ("starting",
+                                                           "running"):
+            return None, "随机点赞正在进行，稍后再缓存"
+        if not pairs:
+            return None, "未选择要缓存的账号"
+        _cache_counter += 1
+        run_id = "cache{:d}".format(_cache_counter)
+        _cache_state = {
+            "run_id": run_id,
+            "status": "starting",
+            "step": "准备缓存",
+            "done": 0,
+            "total": 0,
+            "error": None,
+            "started_at": int(time.time() * 1000),
+            "finished_at": None,
+        }
+        state = _cache_state
+    threading.Thread(target=_cache_worker, args=(pairs, state),
+                     name="tieba-like-cache", daemon=True).start()
+    return run_id, None
+
+
+async def _cache_account(account, bduss, state):
+    import aiotieba
+
+    async with aiotieba.Client(bduss) as client:
+        forums = await _fetch_forums(client, {"phase_ms": {},
+                                              "account_id": account["id"]})
+        if forums is None:
+            return
+        state["total"] += len(forums)
+        store = _load()
+        for forum in forums:
+            fname = str(getattr(forum, "fname", "") or "")
+            if not fname:
+                continue
+            existing = _cache_tids(store, fname)
+            if len(existing) >= _CACHE_BATCH:
+                state["done"] += 1
+                continue
+            res = await client.get_threads(fname, pn=1, rn=_RN)
+            if getattr(res, "err", None) is not None:
+                state["done"] += 1
+                continue
+            new = _cache_candidates(
+                res, _cache_used(store, fname) + existing)
+            merged = (existing + new)[:_CACHE_BATCH]
+            if merged:
+                _cache_set(store, fname, merged)
+            state["done"] += 1
+            state["step"] = "缓存 {}".format(fname)
+            if state["done"] % 10 == 0:
+                _save(store)
+        _save(store)
+
+
+def _cache_worker(pairs, state):
+    try:
+        for account, bduss in pairs:
+            asyncio.run(_cache_account(account, bduss, state))
+        state["status"] = "done"
+        state["step"] = "缓存完成"
+    except Exception as exc:  # noqa: BLE001
+        state["status"] = "error"
+        state["error"] = "{}: {}".format(type(exc).__name__, exc)
+        state["step"] = "缓存失败"
+    finally:
+        state["finished_at"] = int(time.time() * 1000)
 
 
 def start(pairs):
@@ -569,8 +802,23 @@ async def _fetch_forums(client, sub):
     return forums
 
 
+async def _wait_rest(flags, sub):
+    """0.6.6：每 10 个赞后的休息窗，所有任务都要等。"""
+    while True:
+        until = flags.get("rest_until") or 0.0
+        wait = until - time.monotonic()
+        if wait <= 0:
+            break
+        await asyncio.sleep(min(wait, 1.0))
+    if flags.get("rest_text"):
+        flags["rest_text"] = ""
+        flags["rest_until"] = 0
+        _update_account(sub["account_id"], rest_until=0, rest_text="",
+                        step="逐个吧点赞")
+
+
 async def _agree_with_retry(client, tid, sem, limiter, cooldown, flags, sub,
-                            delay, pause_minutes):
+                            gate, pause_minutes):
     """点赞；3280004 时自动暂停，再按百度解除时间/设置时长后重试一次。
 
     L4：等待放在信号量**外面**，并写进全局冷却窗 ``cooldown``：撞一次之后
@@ -584,6 +832,7 @@ async def _agree_with_retry(client, tid, sem, limiter, cooldown, flags, sub,
         if flags.get("stop"):
             return None, last_err
         await _wait_until_resumed()
+        await _wait_rest(flags, sub)
         wait = cooldown["until"] - time.monotonic()
         if wait > 0:
             await asyncio.sleep(wait)
@@ -592,16 +841,10 @@ async def _agree_with_retry(client, tid, sem, limiter, cooldown, flags, sub,
                 _update_account(
                     sub["account_id"], auto_pause_until=0,
                     auto_pause_text="", step="逐个吧点赞")
+        await gate.wait()
         await limiter.acquire()
         await sem.acquire()
         try:
-            if attempt == 0:
-                sleep_started = _now_ms()
-                try:
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                finally:
-                    _phase_add(sub, PHASE_SLEEP, sleep_started)
             agree_started = _now_ms()
             try:
                 resp = await client.agree(tid)
@@ -652,8 +895,9 @@ async def _like_account_async(account, bduss):
         tiers.clamp_like(cfg.get("level", tiers.LIKE_DEFAULT_LEVEL)),
         tiers.max_like_level()))
     like_concurrency = max(1, tier.concurrency)
-    like_delay = tuple(tier.delay)
     like_rate = _starting_rate(tier, cfg)
+    rest_minutes = _rest_minutes(cfg)
+    cache_enabled = bool(cfg.get("cache_enabled", True))
     limiter = None
     flags = {"stop": False, "rate_limited": 0}
     _update_account(aid, tier_level=tier.level, tier_name=tier.name,
@@ -707,6 +951,7 @@ async def _like_account_async(account, bduss):
             # 0.6.3：burst=1，避免提升档位后开跑瞬间同时打出一批请求；
             # 速率本身也被 _LIKE_RATE_CAP 和当天学到的降速值压住。
             limiter = _RateLimiter(like_rate, 1.0)
+            interval_gate = _IntervalGate(_LIKE_INTERVAL)
             cooldown = {"until": 0.0}
             rng = random.SystemRandom()
 
@@ -731,52 +976,71 @@ async def _like_account_async(account, bduss):
                     _bump(aid, "skipped")
                     _bump(aid, "checked")
                     return
-                fetch_started = _now_ms()
-                try:
-                    async with fetch_sem:
-                        threads = await client.get_threads(fname, pn=1,
-                                                           rn=_RN)
-                except Exception as exc:  # noqa: BLE001
-                    info = _describe(exc)
-                    if info["category"] == tieba_codes.CAT_FORUM_BANNED:
-                        # 0.6.2：吧已查封/关闭，跳过、不算失败、不硬停。
-                        _mark_invalid(fname)
+                tid = None
+                title = ""
+                threads = None
+                if cache_enabled:
+                    cached = _cache_tids(store, fname)
+                    if cached:
+                        tid = rng.choice(cached)
+                if tid is None:
+                    fetch_started = _now_ms()
+                    try:
+                        async with fetch_sem:
+                            threads = await client.get_threads(fname, pn=1,
+                                                               rn=_RN)
+                    except Exception as exc:  # noqa: BLE001
+                        info = _describe(exc)
+                        if info["category"] == tieba_codes.CAT_FORUM_BANNED:
+                            # 0.6.2：吧已查封/关闭，跳过、不算失败、不硬停。
+                            _mark_invalid(fname)
+                            _bump(aid, "skipped")
+                            _bump(aid, "checked")
+                            return
+                        _add_failure(sub, fname, info)
+                        _bump(aid, "failed")
+                        _bump(aid, "checked")
+                        return
+                    finally:
+                        _phase_add(sub, PHASE_FETCH, fetch_started)
+                    terr = getattr(threads, "err", None)
+                    if terr is not None:
+                        info = _describe(terr)
+                        if info["category"] == tieba_codes.CAT_FORUM_BANNED:
+                            _mark_invalid(fname)
+                            _bump(aid, "skipped")
+                            _bump(aid, "checked")
+                            return
+                        _add_failure(sub, fname, info)
+                        if info["category"] in (tieba_codes.CAT_ACCOUNT,
+                                                tieba_codes.CAT_CAPTCHA):
+                            # M3b 硬停：登录问题或验证码，继续点只会撞墙。
+                            flags["stop"] = True
+                        _bump(aid, "failed")
+                        _bump(aid, "checked")
+                        return
+                    pool = [t for t in threads
+                            if int(getattr(t, "tid", 0) or 0)
+                            and not bool(getattr(t, "is_top", False))
+                            and not bool(getattr(t, "is_hide", False))]
+                    if not pool:
                         _bump(aid, "skipped")
                         _bump(aid, "checked")
                         return
-                    _add_failure(sub, fname, info)
-                    _bump(aid, "failed")
-                    _bump(aid, "checked")
-                    return
-                finally:
-                    _phase_add(sub, PHASE_FETCH, fetch_started)
-                terr = getattr(threads, "err", None)
-                if terr is not None:
-                    info = _describe(terr)
-                    if info["category"] == tieba_codes.CAT_FORUM_BANNED:
-                        _mark_invalid(fname)
-                        _bump(aid, "skipped")
-                        _bump(aid, "checked")
-                        return
-                    _add_failure(sub, fname, info)
-                    if info["category"] in (tieba_codes.CAT_ACCOUNT,
-                                            tieba_codes.CAT_CAPTCHA):
-                        # M3b 硬停：登录问题或验证码，继续点只会撞墙。
-                        flags["stop"] = True
-                    _bump(aid, "failed")
-                    _bump(aid, "checked")
-                    return
-                pool = [t for t in threads
-                        if int(getattr(t, "tid", 0) or 0)
-                        and not bool(getattr(t, "is_top", False))
-                        and not bool(getattr(t, "is_hide", False))]
-                if not pool:
-                    _bump(aid, "skipped")
-                    _bump(aid, "checked")
-                    return
-                thread = rng.choice(pool)
-                tid = int(thread.tid)
-                title = str(getattr(thread, "title", "") or "")
+                    if cache_enabled:
+                        candidates = _cache_candidates(
+                            pool, _cache_used(store, fname))
+                        if candidates:
+                            _cache_set(store, fname, candidates)
+                            tid = candidates[0]
+                    if tid is None:
+                        if cache_enabled:
+                            _bump(aid, "skipped")
+                            _bump(aid, "checked")
+                            return
+                        thread = rng.choice(pool)
+                        tid = int(thread.tid)
+                        title = str(getattr(thread, "title", "") or "")
                 await _wait_if_paused()
                 if flags["stop"]:
                     _bump(aid, "skipped")
@@ -786,7 +1050,7 @@ async def _like_account_async(account, bduss):
                 # _agree_with_retry（冷却窗在信号量外面）。
                 resp, err = await _agree_with_retry(
                     client, tid, like_sem, limiter, cooldown, flags, sub,
-                    rng.uniform(*like_delay), pause_minutes)
+                    interval_gate, pause_minutes)
                 if flags["stop"]:
                     _bump(aid, "skipped")
                     _bump(aid, "checked")
@@ -808,10 +1072,18 @@ async def _like_account_async(account, bduss):
                         _bump(aid, "checked")
                         return
                     if info["category"] == tieba_codes.CAT_FORUM_BANNED:
+                        if cache_enabled:
+                            _cache_remove(store, fname, tid)
+                            _cache_mark_used(store, fname, tid)
                         _mark_invalid(fname)
                         _bump(aid, "skipped")
                         _bump(aid, "checked")
                         return
+                    if cache_enabled and info["category"] not in (
+                            tieba_codes.CAT_NETWORK, tieba_codes.CAT_ACCOUNT,
+                            tieba_codes.CAT_CAPTCHA):
+                        _cache_remove(store, fname, tid)
+                        _cache_mark_used(store, fname, tid)
                     _add_failure(sub, fname, info)
                     _record(aid, fname, False, tid, title,
                             info["code"], info["reason"],
@@ -823,9 +1095,24 @@ async def _like_account_async(account, bduss):
                     _bump(aid, "failed")
                     _bump(aid, "checked")
                     return
+                if cache_enabled:
+                    _cache_remove(store, fname, tid)
+                    _cache_mark_used(store, fname, tid)
                 _record(aid, fname, True, tid, title)
                 _bump(aid, "success")
                 _bump(aid, "checked")
+                flags["likes_done"] = flags.get("likes_done", 0) + 1
+                if (rest_minutes > 0 and _REST_EVERY > 0
+                        and flags["likes_done"] % _REST_EVERY == 0):
+                    rest_sec = _rest_seconds(rest_minutes)
+                    flags["rest_until"] = time.monotonic() + rest_sec
+                    flags["rest_text"] = "每 {} 个赞休息 {} 分钟".format(
+                        _REST_EVERY, rest_minutes)
+                    _update_account(
+                        aid,
+                        rest_until=int(time.time() * 1000) + rest_sec * 1000,
+                        rest_text=flags["rest_text"],
+                        step="点赞休息中")
 
             like_started = _now_ms()
             try:
