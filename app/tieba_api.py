@@ -11,6 +11,7 @@ import re
 import threading
 
 import redact
+import errors
 import tieba_codes
 
 _loop = None
@@ -65,25 +66,15 @@ async def _validate_async(bduss):
         user = await client.get_self_info()
     err = getattr(user, "err", None)
     if err is not None:
-        code = tieba_codes.parse_code(getattr(err, "code", None))
-        raw = redact.scrub(str(getattr(err, "msg", None) or err), bduss)
-        reason = tieba_codes.reason(code)
-        advice = tieba_codes.advice(code) or (
-            "重新登录这个账号；如果一直失败，请确认 BDUSS 是否完整")
-        if code is None:
-            detail = "百度没有给出错误码，这次登录验证没有成功"
-        elif reason:
-            detail = reason
-        else:
-            detail = "百度没有给出具体原因，这次登录验证没有成功"
+        info = errors.classify(err, bduss, subject="这次登录验证")
         return {
             "ok": False,
-            "category": tieba_codes.CAT_ACCOUNT,
-            "code": code,
-            "reason": reason,
-            "advice": advice,
-            "detail": redact.scrub(detail, bduss),
-            "raw": raw,
+            "category": info["category"],
+            "code": info["code"],
+            "reason": info["reason"],
+            "advice": info["advice"],
+            "detail": info["detail"],
+            "raw": info["raw"],
         }
     user_id = getattr(user, "user_id", None)
     user_name = getattr(user, "user_name", None)
@@ -119,18 +110,16 @@ def validate_bduss(bduss):
                 "detail": "验证超时，请检查网络后重试",
                 "advice": "检查网络后重试"}
     except Exception as exc:  # noqa: BLE001
-        name = type(exc).__name__
-        text = redact.scrub(str(exc), bduss)
-        # transport-level problems: timeout / DNS / TLS / connection
-        if any(k in (name + " " + text)
-               for k in ("Timeout", "ClientConnector", "ClientOSError",
-                         "ClientConnectorError", "Connection", "SSLError",
-                         "socket", "OSError")):
-            return {"ok": False, "category": tieba_codes.CAT_NETWORK,
-                    "detail": "网络连接出了问题，请检查网络后重试",
-                    "advice": "检查网络后重试",
-                    "raw": "{}: {}".format(name, text[:300])}
-        return {"ok": False, "category": tieba_codes.CAT_UNKNOWN,
-                "detail": "登录验证时出现了异常，请稍后再试",
-                "advice": "稍后再试；如果一直失败，请重新添加账号",
-                "raw": "{}: {}".format(name, text[:300])}
+        info = errors.classify(exc, bduss, subject="这次登录验证")
+        # 异常没有错误码时把类型名留在 raw 里，方便区分超时/解析/未知
+        info["raw"] = redact.scrub("{}: {}".format(
+            type(exc).__name__, str(exc)[:300]), bduss)
+        return {
+            "ok": False,
+            "category": info["category"],
+            "code": info["code"],
+            "reason": info["reason"],
+            "advice": info["advice"],
+            "detail": info["detail"],
+            "raw": info["raw"],
+        }

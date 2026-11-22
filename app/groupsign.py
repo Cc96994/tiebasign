@@ -30,6 +30,7 @@ import threading
 import time
 import urllib.request
 
+import errors
 import redact
 import tieba_codes
 import tieba_api
@@ -325,26 +326,13 @@ def _today():
 
 
 def _describe(err):
-    code = tieba_codes.parse_code(getattr(err, "code", None))
-    raw = redact.scrub(str(getattr(err, "msg", None) or err).strip())
-    reason = tieba_codes.reason(code)
-    advice = tieba_codes.advice(code) or (
-        "过一会儿再试；如果一直失败，把这份签到报告发给开发者")
+    """统一分类器：返回 category/code/reason/advice/detail/raw。"""
+    info = errors.classify(err, subject="这条群消息")
     if isinstance(err, Exception) and not hasattr(err, "code"):
-        text = "{} {}".format(type(err).__name__, err).lower()
-        if any(k in text for k in ("timeout", "connection", "ssl",
-                                   "socket", "oserror", "network")):
-            return None, None, "检查网络后重试", \
-                "网络连接出了问题，这条群消息没有发出去", raw
-    if code is None:
-        text = str(err or "").strip()
-        detail = "群消息没有发出去（{}：{}）".format(
-            type(err).__name__, redact.scrub(text)[:120] or "没有返回原因")
-    elif reason:
-        detail = reason
-    else:
-        detail = "百度没有给出具体原因，这条群消息没有发出去"
-    return code, reason, advice, detail, raw
+        # 异常没有 code 时把类型名也留下，方便定位是超时还是解析失败
+        info["raw"] = redact.scrub("{}: {}".format(
+            type(err).__name__, err).strip())
+    return info
 
 
 def _record_run(account_id, chatroom_id, ok, detail="", attempts=1):
@@ -420,18 +408,19 @@ async def run_account_async(client, account, secret=None):
         except Exception as exc:  # noqa: BLE001
             jerr = exc
         if jerr is not None:
-            code, reason, advice, detail, raw = _describe(jerr)
+            info = _describe(jerr)
             _log("join failed cid={} code={} detail={} raw={}".format(
-                cid, code, detail, raw))
-            if tieba_codes.category_for_code(code) == tieba_codes.CAT_ACCOUNT:
+                cid, info["code"], info["detail"], info["raw"]))
+            if info["category"] == tieba_codes.CAT_ACCOUNT:
                 failed += 1
                 detail = "账号登录状态有问题，剩下的群今天不再发送"
                 _record_run(aid, cid, False, detail, attempts)
                 warnings.append({
                     "forum": "群签到：{}".format(name),
                     "category": tieba_codes.CAT_ACCOUNT,
-                    "code": code, "reason": reason, "advice": advice,
-                    "detail": detail, "raw": raw,
+                    "code": info["code"], "reason": info["reason"],
+                    "advice": info["advice"],
+                    "detail": detail, "raw": info["raw"],
                 })
                 details.append({"chatroom_id": cid, "name": name,
                                 "status": "error", "detail": detail})
@@ -441,19 +430,20 @@ async def run_account_async(client, account, secret=None):
         try:
             resp = await client.send_chatroom_msg(cid, fid, text)
         except Exception as exc:  # noqa: BLE001
-            code, reason, advice, detail, raw = _describe(exc)
+            info = _describe(exc)
             failed += 1
-            _record_run(aid, cid, False, detail, attempts)
+            _record_run(aid, cid, False, info["detail"], attempts)
             _log("send exception cid={} code={} detail={} raw={}".format(
-                cid, code, detail, raw))
+                cid, info["code"], info["detail"], info["raw"]))
             warnings.append({
                 "forum": "群签到：{}".format(name),
-                "category": tieba_codes.CAT_NETWORK,
-                "code": code, "reason": reason, "advice": advice,
-                "detail": detail, "raw": raw,
+                "category": info["category"],
+                "code": info["code"], "reason": info["reason"],
+                "advice": info["advice"], "detail": info["detail"],
+                "raw": info["raw"],
             })
             details.append({"chatroom_id": cid, "name": name,
-                            "status": "error", "detail": detail})
+                            "status": "error", "detail": info["detail"]})
             continue
 
         err = getattr(resp, "err", None)
@@ -464,8 +454,11 @@ async def run_account_async(client, account, secret=None):
                             "status": "success", "detail": "发送成功"})
             continue
 
-        code, reason, advice, detail, raw = _describe(err)
-        category = tieba_codes.category_for_code(code) or tieba_codes.CAT_UNKNOWN
+        info = _describe(err)
+        code, reason, advice, detail, raw = (
+            info["code"], info["reason"], info["advice"], info["detail"],
+            info["raw"])
+        category = info["category"]
         failed += 1
         _record_run(aid, cid, False, detail, attempts)
         _log("send failed cid={} code={} detail={} raw={}".format(
